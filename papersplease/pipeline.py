@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Sequence
 
-from . import reading, resolver, screening, sources, store
+from . import filters, reading, resolver, screening, sources, store
 from .config import Settings
 from .intent import exclusion_terms, parse_intent
 from .models import Paper, ScopeSpec, Verdict, title_key
@@ -76,9 +76,10 @@ class Report:
     def summary(self) -> str:
         total = self.in_scope_total if self.in_scope_total is not None else len(self.in_scope)
         shown = f" (showing {len(self.in_scope)})" if total > len(self.in_scope) else ""
+        candidate_word = "candidate" if self.candidates == 1 else "candidates"
         return (
             f"{total} in scope{shown} / {len(self.adjacent)} adjacent / "
-            f"{len(self.out_of_scope)} rejected from {self.candidates} candidates"
+            f"{len(self.out_of_scope)} rejected from {self.candidates} {candidate_word}"
         )
 
     def to_dict(self, *, abstract_chars: int = 700, include_rejected: bool = False) -> dict:
@@ -310,6 +311,12 @@ def find(
     exclude: Iterable[str] = (),
     since: int | None = None,
     until: int | None = None,
+    authors: Iterable[str] = (),
+    venues: Iterable[str] = (),
+    min_citations: int | None = None,
+    types: Iterable[str] = (),
+    peer_reviewed: bool = False,
+    preprints_only: bool = False,
     probe_mirrors: bool = True,
     include_oa: bool = True,
     access_limit: int | None = None,
@@ -342,6 +349,19 @@ def find(
     )
     merged = merge_papers(papers)
     report = Report(spec=spec, warnings=warnings, source_counts=counts, candidates=len(merged))
+    before_filters = len(merged)
+    merged = filters.apply(
+        merged,
+        authors=authors,
+        venues=venues,
+        min_citations=min_citations,
+        types=types,
+        peer_reviewed=peer_reviewed,
+        preprints_only=preprints_only,
+    )
+    report.candidates = len(merged)
+    if len(merged) != before_filters:
+        report.warnings.append(f"filters kept {len(merged)} of {before_filters} candidates")
     caches = store.Caches(settings, enabled=use_cache)
 
     # Read: fill in missing abstracts before judging anything.
@@ -407,7 +427,7 @@ def find(
                 screening.combine(verdicts[shortlist[local_index][0]], item)
     elif use_llm and not settings.llm_enabled:
         report.warnings.append(
-            "LLM screening requested but no key set (PAPERHOUND_LLM_KEY / OPENAI_API_KEY); "
+            "LLM screening requested but no key set (PAPERSPLEASE_LLM_KEY / OPENAI_API_KEY); "
             "used lexical screening only"
         )
 
@@ -526,14 +546,10 @@ def read_one(
     settings: Settings | None = None,
     deep: bool = False,
 ) -> Paper | None:
-    """Look up a single paper by DOI or title and read as much as allowed."""
+    """Look up a single paper by DOI, arXiv id, URL or title."""
     settings = settings or Settings.from_env()
     candidate = doi_or_title.strip()
-    paper: Paper | None = None
-    if candidate.lower().startswith("10.") or "doi.org/" in candidate.lower():
-        paper = sources.fetch_by_doi(candidate, settings)
-    if paper is None:
-        paper = sources.find_by_title(candidate, settings)
+    paper = sources.resolve_identifier(candidate, settings)
     if paper is None:
         return None
     try:

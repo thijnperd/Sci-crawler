@@ -1,4 +1,4 @@
-"""Drive the PaperHound MCP server the way an agent host does.
+"""Drive the PapersPlease MCP server the way an agent host does.
 
 One JSON-RPC message per line over stdio, then a readable transcript. Run it
 from the repository root:
@@ -41,7 +41,7 @@ MESSAGES = [
 
 def main() -> int:
     completed = subprocess.run(
-        [sys.executable, "-m", "paperhound", "mcp"],
+        [sys.executable, "-m", "papersplease", "mcp"],
         cwd=ROOT,
         input="\n".join(json.dumps(message) for message in MESSAGES) + "\n",
         capture_output=True,

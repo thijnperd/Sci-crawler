@@ -239,13 +239,18 @@ def search_arxiv(spec: ScopeSpec, settings: Settings, limit: int, mode: str = "a
     except ET.ParseError as exc:
         return SourceResult("arxiv", warning=f"arXiv: unparseable response ({exc})")
 
+    return SourceResult("arxiv", _arxiv_papers(root))
+
+
+def _arxiv_papers(root: ET.Element) -> list[Paper]:
+    """Normalise the entries of an arXiv Atom feed."""
     papers: list[Paper] = []
     for entry in root.findall(f"{_ATOM}entry"):
         title = clean_text(_text(entry, f"{_ATOM}title"))
         if not title:
             continue
         raw_id = _text(entry, f"{_ATOM}id") or ""
-        arxiv_id = raw_id.rsplit("/", 1)[-1] if raw_id else None
+        identifier = raw_id.rsplit("/", 1)[-1] if raw_id else None
         published = _text(entry, f"{_ATOM}published") or _text(entry, f"{_ATOM}updated")
         papers.append(
             Paper(
@@ -256,20 +261,58 @@ def search_arxiv(spec: ScopeSpec, settings: Settings, limit: int, mode: str = "a
                 journal=clean_text(_text(entry, f"{_ARXIV}journal_ref")),
                 abstract=clean_text(_text(entry, f"{_ATOM}summary")),
                 url=raw_id or None,
-                arxiv_id=arxiv_id,
+                arxiv_id=identifier,
                 keywords=[c.get("term", "") for c in entry.findall(f"{_ATOM}category") if c.get("term")],
                 is_oa=True,
-                oa_url=f"https://arxiv.org/pdf/{arxiv_id}" if arxiv_id else None,
+                oa_url=f"https://arxiv.org/pdf/{identifier}" if identifier else None,
                 type="preprint",
                 sources=["arxiv"],
             )
         )
-    return SourceResult("arxiv", papers)
+    return papers
 
 
 def _text(node: ET.Element, path: str) -> str | None:
     found = node.find(path)
     return found.text.strip() if found is not None and found.text else None
+
+
+_ARXIV_URL = re.compile(r"arxiv\.org/(?:abs|pdf|html)/([^?#\s]+)", re.I)
+_ARXIV_ID = re.compile(
+    r"^(?:\d{4}\.\d{4,5}(?:v\d+)?|[a-z][a-z-]*(?:\.[A-Z]{2})?/\d{7}(?:v\d+)?)$",
+    re.I,
+)
+
+
+def arxiv_id(value: str | None) -> str | None:
+    """Parse a modern or legacy arXiv id, or an arXiv URL."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    match = _ARXIV_URL.search(text)
+    if match:
+        text = match.group(1)
+    text = re.sub(r"^arxiv:\s*", "", text, flags=re.I).strip().rstrip("/")
+    if text.lower().endswith(".pdf"):
+        text = text[:-4]
+    return text if _ARXIV_ID.match(text) else None
+
+
+def fetch_by_arxiv(identifier: str, settings: Settings) -> Paper | None:
+    """Resolve one arXiv id to metadata and a PDF pointer."""
+    ident = arxiv_id(identifier)
+    if not ident:
+        return None
+    url = query_url(
+        "https://export.arxiv.org/api/query",
+        {"id_list": ident, "max_results": 1},
+    )
+    try:
+        root = ET.fromstring(fetch(url, settings, cache_ttl=86400))
+    except (FetchError, ET.ParseError):
+        return None
+    papers = _arxiv_papers(root)
+    return papers[0] if papers else None
 
 
 # --------------------------------------------------------------------------- #
@@ -327,8 +370,8 @@ def search_semanticscholar(spec: ScopeSpec, settings: Settings, limit: int, mode
 # --------------------------------------------------------------------------- #
 
 _RATE_NOTE = (
-    "OpenAlex free daily budget is exhausted for this IP; set PAPERHOUND_OPENALEX_KEY "
-    "for a key (free) or drop openalex from PAPERHOUND_SOURCES"
+    "OpenAlex free daily budget is exhausted for this IP; set PAPERSPLEASE_OPENALEX_KEY "
+    "for a key (free) or drop openalex from PAPERSPLEASE_SOURCES"
 )
 
 
@@ -487,6 +530,35 @@ def expand_citations(
     return list(deduped.values())[:limit], note
 
 
+SOURCE_INFO = {
+    "europepmc": {
+        "label": "Europe PMC",
+        "key_env": "",
+        "note": "abstracts, full text, citation graph",
+    },
+    "crossref": {
+        "label": "Crossref",
+        "key_env": "",
+        "note": "DOI metadata; polite pool",
+    },
+    "arxiv": {
+        "label": "arXiv",
+        "key_env": "",
+        "note": "preprints, abstracts, PDFs",
+    },
+    "semanticscholar": {
+        "label": "Semantic Scholar",
+        "key_env": "PAPERSPLEASE_S2_KEY",
+        "note": "citation counts and venues",
+    },
+    "openalex": {
+        "label": "OpenAlex",
+        "key_env": "PAPERSPLEASE_OPENALEX_KEY",
+        "note": "broad coverage and OA locations",
+    },
+}
+
+
 SEARCHERS = {
     "europepmc": search_europepmc,
     "crossref": search_crossref,
@@ -579,6 +651,22 @@ def fetch_by_doi(doi: str, settings: Settings, *, deep_meta: bool = True) -> Pap
         except FetchError:
             pass
     return paper
+
+
+def resolve_identifier(
+    value: str, settings: Settings, *, deep_meta: bool = False
+) -> Paper | None:
+    """Resolve anything a user may paste: DOI, DOI/arXiv URL, arXiv id or title."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    doi = norm_doi(text)
+    if doi:
+        return fetch_by_doi(doi, settings, deep_meta=deep_meta)
+    ident = arxiv_id(text)
+    if ident:
+        return fetch_by_arxiv(ident, settings)
+    return find_by_title(text, settings)
 
 
 def find_by_title(title: str, settings: Settings, *, rows: int = 5) -> Paper | None:

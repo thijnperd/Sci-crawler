@@ -1,4 +1,4 @@
-# One DOI or title per line. `paperhound check` grades each against the intent.
+# One DOI or title per line. `papersplease check` grades each against the intent.
 Grip strength and physical function in older adults
 Age-related muscle mass loss in older adults
 Resistance training and muscle strength in older adults

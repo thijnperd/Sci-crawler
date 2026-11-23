@@ -2,10 +2,10 @@
 
 import unittest
 
-from paperhound.config import Settings
-from paperhound.models import Paper
-from paperhound.pipeline import find, merge_papers, screen_only
-from paperhound.sources import SourceResult
+from papersplease.config import Settings
+from papersplease.models import Paper
+from papersplease.pipeline import find, merge_papers, screen_only
+from papersplease.sources import SourceResult
 
 
 SETTINGS = Settings(

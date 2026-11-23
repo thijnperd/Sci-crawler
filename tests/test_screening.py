@@ -2,9 +2,9 @@
 
 import unittest
 
-from paperhound.models import Paper, ScopeSpec
-from paperhound.intent import parse_intent
-from paperhound.screening import combine, screen_many, screen_one
+from papersplease.models import Paper, ScopeSpec
+from papersplease.intent import parse_intent
+from papersplease.screening import combine, screen_many, screen_one
 
 INTENT = "muscle strength in older adults"
 
@@ -257,7 +257,7 @@ class ListIntentAnchorTests(unittest.TestCase):
 
 class RequireInFieldTests(unittest.TestCase):
     def setUp(self):
-        from paperhound.intent import parse_intent
+        from papersplease.intent import parse_intent
 
         self.spec = parse_intent(
             "muscle strength in older adults", require=["strength"], require_in="title"

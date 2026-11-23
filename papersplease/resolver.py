@@ -173,7 +173,7 @@ def oa_candidates(paper: Paper, settings: Settings) -> tuple[list[dict], list[st
         except FetchError as exc:
             notes.append(f"Unpaywall: {exc.status or exc.message}")
     elif doi:
-        notes.append("Unpaywall skipped (set PAPERHOUND_MAILTO for open-access lookup)")
+        notes.append("Unpaywall skipped (set PAPERSPLEASE_MAILTO for open-access lookup)")
     found.sort(key=_download_rank)
     return found, notes
 

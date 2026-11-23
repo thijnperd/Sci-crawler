@@ -3,10 +3,10 @@
 import unittest
 from unittest.mock import patch
 
-from paperhound import resolver
-from paperhound.config import Settings
-from paperhound.models import Paper
-from paperhound.net import Blocked, FetchError
+from papersplease import resolver
+from papersplease.config import Settings
+from papersplease.models import Paper
+from papersplease.net import Blocked, FetchError
 
 
 SETTINGS = Settings(
@@ -123,7 +123,7 @@ class AccessTests(unittest.TestCase):
         paper = Paper(title="T", oa_url="https://example.org/landing")
         access = self._access(paper, include_oa=True)
         access.open_access.append({"url": "https://example.org/paper.pdf", "kind": "unpaywall-pdf", "license": None})
-        from paperhound.resolver import _download_rank
+        from papersplease.resolver import _download_rank
 
         ordered = sorted(access.open_access, key=_download_rank)
         self.assertTrue(ordered[0]["url"].endswith(".pdf"))

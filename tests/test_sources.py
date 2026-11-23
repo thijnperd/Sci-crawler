@@ -3,9 +3,9 @@
 import unittest
 from unittest.mock import patch
 
-from paperhound.config import Settings
-from paperhound.intent import parse_intent
-from paperhound import sources
+from papersplease.config import Settings
+from papersplease.intent import parse_intent
+from papersplease import sources
 
 
 SETTINGS = Settings(cache=False, mailto="test@example.org", unpaywall_email="test@example.org")
@@ -53,7 +53,7 @@ class EuropePmcTests(unittest.TestCase):
         self.assertEqual(result.papers[0].sources, ["europepmc"])
 
     def test_failure_is_a_warning_not_an_exception(self):
-        from paperhound.net import FetchError
+        from papersplease.net import FetchError
 
         with patch.object(sources, "fetch_json", side_effect=FetchError("u", 500, "boom")):
             result = sources.search_europepmc(parse_intent("muscle strength"), SETTINGS, 5)
@@ -146,6 +146,34 @@ class ArxivTests(unittest.TestCase):
         self.assertEqual(result.papers, [])
 
 
+class ArxivIdentifierTests(unittest.TestCase):
+    def test_parses_modern_legacy_and_url_forms(self):
+        for value in (
+            "2401.12345",
+            "2401.12345v2",
+            "arXiv:2401.12345",
+            "https://arxiv.org/abs/2401.12345",
+            "https://arxiv.org/pdf/2401.12345.pdf",
+            "cs/0002001",
+            "alg-geom/9708001v1",
+        ):
+            self.assertIsNotNone(sources.arxiv_id(value), value)
+
+    def test_does_not_mistake_a_doi_or_title_for_an_arxiv_id(self):
+        self.assertIsNone(sources.arxiv_id("10.1000/xyz"))
+        self.assertIsNone(sources.arxiv_id("Learned models of muscle strength"))
+
+    def test_fetch_by_arxiv_reuses_the_entry_parser(self):
+        with patch.object(sources, "fetch", return_value=ARXIV_XML):
+            paper = sources.fetch_by_arxiv("https://arxiv.org/abs/2401.00001v1", SETTINGS)
+        self.assertIsNotNone(paper)
+        self.assertEqual(paper.arxiv_id, "2401.00001v1")
+        self.assertEqual(paper.title, "Learned models of muscle strength")
+
+    def test_fetch_by_arxiv_returns_none_for_a_bad_id(self):
+        self.assertIsNone(sources.fetch_by_arxiv("not-an-id", SETTINGS))
+
+
 class OpenAlexTests(unittest.TestCase):
     def test_inverted_abstract_is_reconstructed(self):
         inverted = {"Muscle": [0], "strength": [1], "declines.": [2]}
@@ -154,11 +182,11 @@ class OpenAlexTests(unittest.TestCase):
 
     def test_rate_limit_message_is_actionable(self):
         inverted = None
-        from paperhound.net import FetchError
+        from papersplease.net import FetchError
 
         with patch.object(sources, "fetch_json", side_effect=FetchError("u", 429, "Rate limit")):
             result = sources.search_openalex(parse_intent("muscle"), SETTINGS, 5)
-        self.assertIn("PAPERHOUND_OPENALEX_KEY", result.warning)
+        self.assertIn("PAPERSPLEASE_OPENALEX_KEY", result.warning)
 
 
 class CleanTextTests(unittest.TestCase):

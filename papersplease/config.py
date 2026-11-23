@@ -22,11 +22,11 @@ def _split(value: str | None) -> list[str]:
 
 
 def default_cache_dir() -> Path:
-    override = os.environ.get("PAPERHOUND_CACHE_DIR")
+    override = os.environ.get("PAPERSPLEASE_CACHE_DIR")
     if override:
         return Path(override).expanduser()
     base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
-    return Path(base) / "paperhound"
+    return Path(base) / "papersplease"
 
 
 @dataclass
@@ -51,42 +51,42 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         settings = cls()
-        settings.mailto = os.environ.get("PAPERHOUND_MAILTO", "")
-        settings.openalex_key = os.environ.get("PAPERHOUND_OPENALEX_KEY", "")
-        settings.s2_key = os.environ.get("PAPERHOUND_S2_KEY", "")
+        settings.mailto = os.environ.get("PAPERSPLEASE_MAILTO", "")
+        settings.openalex_key = os.environ.get("PAPERSPLEASE_OPENALEX_KEY", "")
+        settings.s2_key = os.environ.get("PAPERSPLEASE_S2_KEY", "")
         settings.unpaywall_email = (
-            os.environ.get("PAPERHOUND_UNPAYWALL_EMAIL") or settings.mailto
+            os.environ.get("PAPERSPLEASE_UNPAYWALL_EMAIL") or settings.mailto
         )
-        mirrors = _split(os.environ.get("PAPERHOUND_SCIHUB_MIRRORS"))
+        mirrors = _split(os.environ.get("PAPERSPLEASE_SCIHUB_MIRRORS"))
         if mirrors:
             settings.mirrors = [m.rstrip("/") for m in mirrors]
         else:
             settings.mirrors = [m.rstrip("/") for m in settings.mirrors]
-        sources = _split(os.environ.get("PAPERHOUND_SOURCES"))
+        sources = _split(os.environ.get("PAPERSPLEASE_SOURCES"))
         if sources:
             settings.sources = sources
-        if os.environ.get("PAPERHOUND_NO_CACHE"):
+        if os.environ.get("PAPERSPLEASE_NO_CACHE"):
             settings.cache = False
-        if os.environ.get("PAPERHOUND_CACHE_DIR"):
+        if os.environ.get("PAPERSPLEASE_CACHE_DIR"):
             settings.cache_dir = default_cache_dir()
         try:
-            settings.min_scope = float(os.environ.get("PAPERHOUND_MIN_SCOPE", "0.7"))
+            settings.min_scope = float(os.environ.get("PAPERSPLEASE_MIN_SCOPE", "0.7"))
         except ValueError:
             settings.min_scope = 0.7
         # Accept either a dedicated key or the conventional OPENAI_API_KEY.
         settings.llm_base = (
-            os.environ.get("PAPERHOUND_LLM_BASE")
+            os.environ.get("PAPERSPLEASE_LLM_BASE")
             or os.environ.get("OPENAI_BASE_URL")
-            or ("https://api.openai.com/v1" if os.environ.get("PAPERHOUND_LLM_KEY") or os.environ.get("OPENAI_API_KEY") else "")
+            or ("https://api.openai.com/v1" if os.environ.get("PAPERSPLEASE_LLM_KEY") or os.environ.get("OPENAI_API_KEY") else "")
         ).rstrip("/")
-        settings.llm_key = os.environ.get("PAPERHOUND_LLM_KEY") or os.environ.get("OPENAI_API_KEY", "")
-        settings.llm_model = os.environ.get("PAPERHOUND_LLM_MODEL", settings.llm_model)
-        if os.environ.get("PAPERHOUND_LLM_JSON") in {"0", "false", "no"}:
+        settings.llm_key = os.environ.get("PAPERSPLEASE_LLM_KEY") or os.environ.get("OPENAI_API_KEY", "")
+        settings.llm_model = os.environ.get("PAPERSPLEASE_LLM_MODEL", settings.llm_model)
+        if os.environ.get("PAPERSPLEASE_LLM_JSON") in {"0", "false", "no"}:
             settings.llm_json_mode = False
         contact = settings.mailto or settings.unpaywall_email or "anonymous"
         settings.user_agent = os.environ.get(
-            "PAPERHOUND_USER_AGENT",
-            f"paperhound/0.1 (+https://github.com/thijnperd/Sci-crawler; mailto:{contact})",
+            "PAPERSPLEASE_USER_AGENT",
+            f"papersplease/0.4 (+https://github.com/thijnperd/Sci-crawler; mailto:{contact})",
         )
         return settings
 

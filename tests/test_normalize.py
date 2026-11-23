@@ -2,8 +2,8 @@
 
 import unittest
 
-from paperhound.intent import parse_intent
-from paperhound.normalize import normalize_intent
+from papersplease.intent import parse_intent
+from papersplease.normalize import normalize_intent
 
 
 DUTCH = (
@@ -83,8 +83,8 @@ class DutchIntentParsingTests(unittest.TestCase):
         self.assertNotIn("spiergroei", query)
 
     def test_explain_payload_carries_the_translation(self):
-        from paperhound.pipeline import explain_intent
-        from paperhound.config import Settings
+        from papersplease.pipeline import explain_intent
+        from papersplease.config import Settings
 
         payload = explain_intent(DUTCH, settings=Settings(cache=False))
         self.assertTrue(payload["facets"])

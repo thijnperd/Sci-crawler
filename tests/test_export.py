@@ -1,10 +1,11 @@
 """BibTeX and RIS export."""
 
+import json
 import unittest
 
-from paperhound.export import to_bibtex, to_ris
-from paperhound.models import Paper, Verdict
-from paperhound.pipeline import Finding
+from papersplease.export import to_bibtex, to_csl_json, to_ris
+from papersplease.models import Paper, Verdict
+from papersplease.pipeline import Finding
 
 
 def finding(**kwargs) -> Finding:
@@ -51,6 +52,24 @@ class BibtexTests(unittest.TestCase):
 
     def test_empty_list_is_empty_output(self):
         self.assertEqual(to_bibtex([]), "")
+
+
+class CslJsonTests(unittest.TestCase):
+    def test_record_has_the_fields_citeproc_reads(self):
+        records = json.loads(to_csl_json([finding()]))
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["title"], "Effects of resistance training volume on hypertrophy")
+        self.assertEqual(record["DOI"], "10.1000/abc")
+        self.assertEqual(record["issued"], {"date-parts": [[2021]]})
+        self.assertEqual(record["container-title"], "Journal of Strength Research")
+        self.assertEqual(record["author"][0], {"family": "Schoenfeld", "given": "Brad"})
+
+    def test_plain_papers_are_accepted_and_ids_are_stable(self):
+        paper = Paper(title="Sets and reps", doi="10.1/x", year=2020, authors=["Doe Jane"])
+        record = json.loads(to_csl_json([paper]))[0]
+        self.assertEqual(record["id"], "10.1/x")
+        self.assertEqual(record["author"], [{"family": "Doe", "given": "Jane"}])
 
 
 class RisTests(unittest.TestCase):

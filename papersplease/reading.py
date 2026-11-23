@@ -94,7 +94,7 @@ def fetch_pdf_text(url: str, settings: Settings) -> tuple[str | None, str]:
     try:
         import pypdf  # type: ignore
     except ImportError:
-        return None, "PDF reader not installed (pip install 'paperhound[pdf]')"
+        return None, "PDF reader not installed (pip install 'papersplease[pdf]')"
     try:
         # Publishers answer 403 to a scripted client; retrying with a 90 s
         # timeout just makes a deep read feel hung. Fail fast, try the next

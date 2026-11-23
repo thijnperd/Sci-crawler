@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from paperhound.config import Settings
-from paperhound.mcp_server import PROTOCOL_VERSIONS, TOOLS, handle_message
+from papersplease.config import Settings
+from papersplease.mcp_server import PROTOCOL_VERSIONS, TOOLS, handle_message
 
 
 SETTINGS = Settings(cache=False, mirrors=["https://sci-hub.se"], mailto="", unpaywall_email="", openalex_key="", s2_key="")
@@ -29,7 +29,7 @@ class InitializeTests(unittest.TestCase):
         for version in PROTOCOL_VERSIONS:
             response = call("initialize", {"protocolVersion": version, "capabilities": {}})
             self.assertEqual(response["result"]["protocolVersion"], version)
-            self.assertEqual(response["result"]["serverInfo"]["name"], "paperhound")
+            self.assertEqual(response["result"]["serverInfo"]["name"], "papersplease")
             self.assertIn("tools", response["result"]["capabilities"])
 
     def test_unknown_protocol_falls_back(self):
@@ -58,6 +58,22 @@ class ToolListingTests(unittest.TestCase):
         self.assertIn("query", tools["search_literature"]["inputSchema"]["required"])
         self.assertIn("papers", tools["screen_papers"]["inputSchema"]["required"])
         self.assertIn("explain_scope", tools)
+
+    def test_search_exposes_merge_level_filters(self):
+        tools = {tool["name"]: tool for tool in call("tools/list")["result"]["tools"]}
+        props = tools["search_literature"]["inputSchema"]["properties"]
+        for name in ("author", "venue", "min_citations", "type", "peer_reviewed", "preprints_only"):
+            self.assertIn(name, props)
+
+    def test_paper_tools_accept_an_identifier(self):
+        tools = {tool["name"]: tool for tool in call("tools/list")["result"]["tools"]}
+        for name in ("get_paper_access", "read_paper", "download_paper"):
+            self.assertIn("id", tools[name]["inputSchema"]["properties"], name)
+
+    def test_export_offers_csl_json(self):
+        tools = {tool["name"]: tool for tool in call("tools/list")["result"]["tools"]}
+        enum = tools["export_citations"]["inputSchema"]["properties"]["format"]["enum"]
+        self.assertIn("csljson", enum)
 
     def test_tools_are_marked_read_only_for_hosts(self):
         tools = {tool["name"]: tool for tool in call("tools/list")["result"]["tools"]}
@@ -232,7 +248,7 @@ class StdioTransportTests(unittest.TestCase):
         ]
         stdin = "\n".join(m if isinstance(m, str) else json.dumps(m) for m in messages) + "\n"
         completed = subprocess.run(
-            [sys.executable, "-m", "paperhound", "mcp"],
+            [sys.executable, "-m", "papersplease", "mcp"],
             input=stdin,
             capture_output=True,
             text=True,
@@ -244,7 +260,7 @@ class StdioTransportTests(unittest.TestCase):
         replies = [json.loads(line) for line in lines]
         # initialize, tools/list and one parse-error reply; the notification is silent.
         self.assertEqual(len(replies), 3)
-        self.assertEqual(replies[0]["result"]["serverInfo"]["name"], "paperhound")
+        self.assertEqual(replies[0]["result"]["serverInfo"]["name"], "papersplease")
         self.assertGreaterEqual(len(replies[1]["result"]["tools"]), 5)
         self.assertEqual(replies[2]["error"]["code"], -32700)
         # stdout must carry nothing but JSON-RPC; the banner belongs on stderr.
@@ -257,7 +273,7 @@ class CliSmokeTests(unittest.TestCase):
     def test_help_and_version(self):
         for args in (["--help"], ["--version"]):
             completed = subprocess.run(
-                [sys.executable, "-m", "paperhound", *args],
+                [sys.executable, "-m", "papersplease", *args],
                 capture_output=True,
                 text=True,
                 cwd=str(REPO_ROOT),
@@ -271,7 +287,7 @@ class CliSmokeTests(unittest.TestCase):
             handle.write("Grip strength and physical function in older adults\n")
             handle.close()
             completed = subprocess.run(
-                [sys.executable, "-m", "paperhound", "check", "muscle strength in older adults", handle.name],
+                [sys.executable, "-m", "papersplease", "check", "muscle strength in older adults", handle.name],
                 capture_output=True,
                 text=True,
                 cwd=str(REPO_ROOT),
@@ -289,7 +305,7 @@ class CliSmokeTests(unittest.TestCase):
             handle.close()
             completed = subprocess.run(
                 [
-                    sys.executable, "-m", "paperhound", "check",
+                    sys.executable, "-m", "papersplease", "check",
                     "muscle strength in older adults", handle.name, "--format", "bibtex",
                 ],
                 capture_output=True,
@@ -304,7 +320,7 @@ class CliSmokeTests(unittest.TestCase):
 
     def test_bare_intent_is_treated_as_find(self):
         completed = subprocess.run(
-            [sys.executable, "-m", "paperhound", "find", "--help"],
+            [sys.executable, "-m", "papersplease", "find", "--help"],
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),

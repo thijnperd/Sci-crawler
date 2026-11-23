@@ -1,4 +1,4 @@
-"""Citation export: BibTeX for LaTeX, RIS for Zotero/EndNote/Mendeley.
+"""Citation export: BibTeX, RIS and CSL-JSON for reference managers.
 
 An agent that has just screened a literature list usually needs to hand it to a
 reference manager, not retype twenty entries. These exporters take the same
@@ -10,6 +10,7 @@ what breaks a parser.
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from typing import Iterable, Sequence
@@ -121,7 +122,40 @@ def _urls(item: Finding | Paper) -> Iterable[str]:
         yield item.url
 
 
-FORMATS = ("text", "md", "json", "bibtex", "ris")
+def _csl_name(author: str) -> dict[str, str]:
+    """Split "Surname Given" (the pipeline's convention) into CSL name parts."""
+    parts = [part for part in re.split(r"\s+", author.strip()) if part]
+    if len(parts) < 2:
+        return {"literal": author.strip() or "anonymous"}
+    return {"family": parts[0], "given": " ".join(parts[1:])}
+
+
+def to_csl_json(items: Sequence[Finding | Paper]) -> str:
+    """CSL-JSON, the format Zotero, Pandoc and citeproc consume directly."""
+    records: list[dict] = []
+    used: set[str] = set()
+    for item in items:
+        paper = _paper(item)
+        record: dict = {
+            "id": paper.doi or _key(paper, used),
+            "type": "article-journal",
+            "title": paper.title,
+        }
+        if paper.authors:
+            record["author"] = [_csl_name(author) for author in paper.authors]
+        if paper.year:
+            record["issued"] = {"date-parts": [[paper.year]]}
+        if paper.journal:
+            record["container-title"] = paper.journal
+        if paper.doi:
+            record["DOI"] = paper.doi
+        if paper.url:
+            record["URL"] = paper.url
+        records.append(record)
+    return json.dumps(records, ensure_ascii=False, indent=2) + "\n"
+
+
+FORMATS = ("text", "md", "json", "bibtex", "ris", "csljson")
 
 
 def render(items: Sequence[Finding | Paper], fmt: str) -> str:
@@ -129,4 +163,6 @@ def render(items: Sequence[Finding | Paper], fmt: str) -> str:
         return to_bibtex(items)
     if fmt == "ris":
         return to_ris(items)
+    if fmt == "csljson":
+        return to_csl_json(items)
     raise ValueError(f"unsupported citation format: {fmt}")

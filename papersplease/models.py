@@ -1,4 +1,4 @@
-"""Core data structures shared by every part of PaperHound."""
+"""Core data structures shared by every part of PapersPlease."""
 
 from __future__ import annotations
 

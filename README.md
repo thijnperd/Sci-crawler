@@ -1,4 +1,4 @@
-# PaperHound
+# PapersPlease
 
 **A literature crawler built for AI agents: it reads the paper before it hands you a link.**
 
@@ -7,17 +7,20 @@ spreadsheet of DOIs and clicks a Chrome button 800 times. That still leaves the 
 to you: deciding *which* papers are actually about what you asked for, and then finding a
 working mirror for each one.
 
-PaperHound is the spiritual successor for AI. You give it a research intent in plain words.
+PapersPlease is the spiritual successor for AI. You give it a research intent in plain words.
 It searches five literature APIs, reads every candidate, **screens each paper for whether it
 is genuinely on that subject** (not merely whether it contains the word "muscle"), and only
 then attaches open-access and Sci-Hub links. It is a first-class MCP tool: any agent can call
 it, and every response is shaped for a model to reason over.
 
 ```bash
-paperhound find "muscle strength in older adults since 2015"
+papersplease find "muscle strength in older adults since 2015"
 ```
 
-<img src="docs/screenshots/find.png" alt="paperhound find: 14 papers in scope, three shown with scope reasons and Sci-Hub mirror states" width="1000">
+> **Name note.** This is not [paperhound](https://pypi.org/project/paperhound/), the unrelated
+> eight-provider CLI by Alejandro Fernández Camello. This project is **PapersPlease**; the
+> distribution and command are both `papersplease`. See [SOURCES.md](SOURCES.md) for the
+> comparison, the honest gaps, and attribution.
 
 Zero runtime dependencies. Python 3.10+. CLI, Python library, and MCP server over the same
 pipeline.
@@ -31,7 +34,7 @@ muscle *mass*, protein intake, or rats. Ask Sci-Hub for a DOI and you still have
 of its mirrors answers today. Both steps are mechanical, and both are exactly what an agent
 should do for you — but only if it can tell a relevant paper from a plausible-looking one.
 
-PaperHound does four things:
+PapersPlease does four things:
 
 1. **Search** Europe PMC, Crossref, arXiv, Semantic Scholar and OpenAlex from one sentence.
 2. **Read** titles, abstracts, MeSH keywords, and — with `--deep` — open-access full text.
@@ -42,6 +45,55 @@ PaperHound does four things:
 
 The report separates **in scope** from **adjacent** ("wrong population, check it yourself")
 and **out of scope** (with the missing concepts named). Nothing is silently promoted.
+
+## Terminal output
+
+Text output is designed to be read, not parsed: one brand header, aligned labels, bold paper
+titles, coloured bucket badges (green in scope, amber adjacent, red rejected), grouped links,
+and reasons wrapped to the terminal width. The adjacent bucket shows the first six and says
+where the rest are; `--format json` always carries every result.
+
+```text
+PapersPlease  ·  literature scope report
+────────────────────────────────────────────────────────────────────────
+Intent   "sets and frequency for hypertrophy"
+Scope    volume + frequency + hypertrophy
+Limits   coverage ≥ 0.70  ·  anchors volume, frequency
+Result   4 in scope (showing 2)  ·  1 adjacent  ·  1 rejected  ·  from 71 candidates
+
+● IN SCOPE  2
+────────────────────────────────────────────────────────────────────────
+ 1. Equal-volume resistance training and muscle hypertrophy: a randomized trial
+    Baz-Valle Daniel, Schoenfeld Brad  ·  2020  ·  cited 41
+    Medicine & Science in Sports & Exercise
+    doi 10.1249/mss.0000000000002088
+    ● 0.94  coverage 1.00  ·  matched volume, frequency, hypertrophy
+    why title names volume and hypertrophy
+    OA       https://example.org/paper.pdf (CC BY)
+    Sci-Hub  https://sci-hub.ru/10.1249/mss.0000000000002088  ✓ [ok]
+
+◐ ADJACENT  1
+────────────────────────────────────────────────────────────────────────
+ 1. Creatine supplementation in older men
+    Candow Darren  ·  2017  ·  cited 120
+    J Strength Cond Res
+    doi 10.1519/jsc.0000000000000381
+    ◐ 0.61  coverage 0.62  ·  matched hypertrophy
+    why title names none of the anchor concepts (volume, frequency)
+
+○ REJECTED  1
+────────────────────────────────────────────────────────────────────────
+✗ Vegan protein and muscle mass in older adults
+  title names none of the anchor concepts (volume, frequency); volume missing
+```
+
+Colour is automatic only on a TTY. `NO_COLOR=1` or `PAPERSPLEASE_COLOR=never` disables it,
+`PAPERSPLEASE_COLOR=always` forces it, and pipes plus `--json` stay free of escape codes.
+Search, read, download and mirror checks show a one-line spinner on **stderr** while they
+wait, so stdout stays clean for pipes.
+`--out` writes plain, 96-column text. The same renderer drives `explain`, `check`, `read`,
+`providers`, `mirrors` and `download`, so the layout does not change from command to command.
+`papersplease --help` ends with runnable examples.
 
 ## Install
 
@@ -61,22 +113,31 @@ pip install -e '.[pdf]'
 
 ```bash
 # the main event
-paperhound find "resistance training and muscle strength in older adults"
+papersplease find "resistance training and muscle strength in older adults"
 
 # narrower: strength has to be there; rodents disqualify a paper
-paperhound find "muscle in older adults" --require strength --exclude rodents
+papersplease find "muscle in older adults" --require strength --exclude rodents
 
 # see exactly how the intent is parsed before spending a search
-paperhound explain "muscle strength in older adults not about rodents"
+papersplease explain "muscle strength in older adults not about rodents"
 
 # grade a reference list you already have (one DOI or title per line)
-paperhound check "muscle strength in older adults" docs/examples/refs.txt
+papersplease check "muscle strength in older adults" docs/examples/refs.txt
 
-# one paper, by DOI or title
-paperhound read 10.7717/peerj.12958 --deep
+# one paper, by DOI, arXiv id, URL or title
+papersplease read 10.7717/peerj.12958 --deep
+
+# one or many PDFs by identifier
+papersplease download 10.7717/peerj.12958 2401.12345 -d papers/
+
+# filters are applied after the sources are merged, so every source obeys them
+papersplease find "resistance training volume" --author Schoenfeld --min-citations 50 --peer-reviewed
+
+# which sources are enabled, and which key each one wants
+papersplease providers
 
 # which mirrors answer from this machine?
-paperhound mirrors
+papersplease mirrors
 ```
 
 `find` prints the facets it used, where each candidate came from, the verdict and its reason,
@@ -88,7 +149,7 @@ carry resolved links; `in_scope_total` still reports the true count.
 ## Built for agents: MCP
 
 ```bash
-paperhound mcp        # newline-delimited JSON-RPC 2.0 on stdio
+papersplease mcp        # newline-delimited JSON-RPC 2.0 on stdio
 ```
 
 Claude Desktop, Cursor, Codex, Continue, or a hand-rolled host:
@@ -96,7 +157,7 @@ Claude Desktop, Cursor, Codex, Continue, or a hand-rolled host:
 ```json
 {
   "mcpServers": {
-    "paperhound": { "command": "paperhound", "args": ["mcp"] }
+    "papersplease": { "command": "papersplease", "args": ["mcp"] }
   }
 }
 ```
@@ -104,17 +165,15 @@ Claude Desktop, Cursor, Codex, Continue, or a hand-rolled host:
 The server is dependency-free: it speaks the MCP stdio transport directly and negotiates
 protocol versions `2025-06-18`, `2025-03-26` and `2024-11-05`.
 
-<img src="docs/screenshots/mcp.png" alt="An MCP session: initialize, eight tools, and an explain_scope call" width="1000">
-
 | tool | what it does | network |
 |---|---|---|
 | `explain_scope` | parse an intent: facets, head concept, exclusions, years, source query | no |
 | `search_literature` | full pipeline: search → read → screen → rank → links; optional citation-graph `expand` | yes |
 | `screen_papers` | grade papers the agent already has (title/DOI/abstract) | no |
-| `get_paper_access` | open-access + Sci-Hub links for one DOI/title, with mirror health | yes |
+| `get_paper_access` | open-access + Sci-Hub links for one DOI/arXiv id/URL/title, with mirror health | yes |
 | `read_paper` | metadata, abstract, and optional open-access full text | yes |
 | `download_paper` | save the first response that really is a PDF; reports path and source | yes (writes one file) |
-| `export_citations` | BibTeX or RIS for Zotero/EndNote | no |
+| `export_citations` | BibTeX, RIS or CSL-JSON for Zotero/EndNote/Pandoc | no |
 | `mirror_status` | which mirrors answer right now | yes |
 
 ### The agent contract
@@ -219,9 +278,7 @@ stopped at the wrong places. That is fixed. The rules are:
 | `resistance training without equipment in older adults` | exclusion `equipment in older adults` | exclusion `equipment`, population intact |
 | `no significant difference in strength in older adults` | exclusion `significant difference...` | no exclusion |
 
-`paperhound explain` shows the result before any search:
-
-<img src="docs/screenshots/explain.png" alt="paperhound explain: facets, head concept, excludes, threshold and the source query" width="1000">
+`papersplease explain` shows the result before any search:
 
 Every report also carries the parse (`scope` in JSON, `scope:`/`excluding:` lines in text), so
 a wrong head or an over-eager exclusion is visible rather than silent. Use `--require` and
@@ -236,42 +293,44 @@ LLM pass is for.
 
 | command | purpose |
 |---|---|
-| `paperhound find "intent"` | search → read → screen → rank → links |
-| `paperhound check "intent" [file]` | grade a list of DOIs/titles (`-` or stdin) |
-| `paperhound explain "intent"` | show the parse, offline |
-| `paperhound read DOI_OR_TITLE` | one paper, optional `--deep` full text |
-| `paperhound mirrors` | mirror health, `--refresh` to bypass the 10-minute cache |
-| `paperhound mcp` | MCP server on stdio |
+| `papersplease find "intent"` | search → read → screen → rank → links |
+| `papersplease check "intent" [file]` | grade a list of DOIs/titles (`-` or stdin) |
+| `papersplease explain "intent"` | show the parse, offline |
+| `papersplease read IDENTIFIER` | one paper by DOI, arXiv id, URL or title; optional `--deep` full text |
+| `papersplease download ID...` | bulk PDF download by DOI/arXiv id/URL, `-d DIR` |
+| `papersplease providers` | which sources are enabled and which key each needs |
+| `papersplease mirrors` | mirror health, `--refresh` to bypass the 10-minute cache |
+| `papersplease mcp` | MCP server on stdio |
 
 A bare intent is treated as `find`, and `--json`/`--md`/`--format`/`--out` work on `find`,
-`check` and `explain`. `--format` adds `bibtex` and `ris` next to `text`, `md` and `json`;
-citation formats export the in-scope papers only.
+`check` and `explain`. `--format` adds `bibtex`, `ris` and `csljson` next to `text`, `md`
+and `json`; citation formats export the in-scope papers only.
 
 Intents may be written in Dutch or in gym shorthand (`reps`, `set count`). A small technical
 lexicon translates them before parsing and `explain` shows both the translation and the
 result, so you can see exactly what was searched for.
 
-<img src="docs/screenshots/check.png" alt="paperhound check grading six titles into in scope, adjacent and rejected" width="1000">
-
-<img src="docs/screenshots/read.png" alt="paperhound read --deep showing metadata, the full-text note, an abstract and links" width="1000">
-
 ### Flags for `find`
 
 | flag | effect |
 |---|---|
-| `--limit N` | how many in-scope papers to show (each source is asked for ~2× the pool) |
+| `--limit N` | show at most N in-scope papers; also sizes the candidate pool (~2× per source) |
 | `--sources a,b` | subset of `europepmc,crossref,arxiv,semanticscholar,openalex` |
 | `--since YYYY`, `--until YYYY` | date filters (also parsed from "since 2015", "2010-2018", "last 5 years") |
+| `--author NAME`, `--venue NAME` | case-insensitive substring, repeatable; applied after merging |
+| `--min-citations N` | drop papers below N citations (unknown counts cannot pass) |
+| `--type journal\|conference\|preprint\|book\|other` | publication type, repeatable |
+| `--peer-reviewed`, `--preprints-only` | shortcuts for the corresponding types |
 | `--require TERM` | force a concept to be present and weight it higher (repeatable) |
 | `--exclude TERM` | hard disqualifier (repeatable, comma-separated) |
 | `--min-scope F` | in-scope coverage threshold |
 | `--deep`, `--deep-limit N` | read open-access full text for the top N and re-check scope |
-| `--llm` / `--no-llm` | LLM second opinion (needs `PAPERHOUND_LLM_KEY`) |
+| `--llm` / `--no-llm` | LLM second opinion (needs `PAPERSPLEASE_LLM_KEY`) |
 | `--download DIR` | save the first verified PDF per in-scope paper |
 | `--require-in title\|abstract\|title_or_abstract` | where the `--require` terms must appear (literal, not thesaurus-expanded) |
 | `--expand citations\|references\|both` | walk one citation-graph hop from the best matches and screen the result |
 | `--expand-limit N` | candidates added by expansion (default 25) |
-| `--format text\|md\|json\|bibtex\|ris` | output format; `bibtex`/`ris` export in-scope papers |
+| `--format text\|md\|json\|bibtex\|ris\|csljson` | output format; citation formats export in-scope papers |
 | `--refresh` | ignore cached verdicts and access lookups |
 | `--json`, `--md`, `--out FILE` | machine output, Markdown report, write to a file |
 | `--include-rejected` | include rejected papers and reasons in JSON |
@@ -317,7 +376,7 @@ detail section you can paste into notes.
 ## Python library
 
 ```python
-from paperhound import find
+from papersplease import find
 
 report = find("muscle strength in older adults", limit=15, deep=True)
 print(report.summary())
@@ -330,10 +389,11 @@ for finding in report.adjacent:
     print("check this one:", finding.paper.title, "|", finding.verdict.reason)
 ```
 
-Lower-level pieces are usable on their own: `paperhound.intent.parse_intent`,
-`paperhound.intent.exclusion_terms`, `paperhound.screening.screen_one`,
-`paperhound.pipeline.explain_intent`, `paperhound.resolver.access_for`,
-`paperhound.sources.fetch_by_doi`.
+Lower-level pieces are usable on their own: `papersplease.intent.parse_intent`,
+`papersplease.intent.exclusion_terms`, `papersplease.screening.screen_one`,
+`papersplease.pipeline.explain_intent`, `papersplease.resolver.access_for`,
+`papersplease.sources.fetch_by_doi`, `papersplease.sources.resolve_identifier`,
+`papersplease.filters.apply`.
 
 ## Sources
 
@@ -342,14 +402,14 @@ Lower-level pieces are usable on their own: `paperhound.intent.parse_intent`,
 | Europe PMC | abstracts, MeSH keywords, PMC full text | broadest life-science coverage, no key; it has no relevance sort, so the most-cited matches are requested |
 | Crossref | DOIs, journal metadata, citation counts | no key |
 | arXiv | preprints, PDF links | no key |
-| Semantic Scholar | abstracts, citation counts, OA PDFs | slow without `PAPERHOUND_S2_KEY` |
+| Semantic Scholar | abstracts, citation counts, OA PDFs | slow without `PAPERSPLEASE_S2_KEY` |
 | OpenAlex | topics, abstracts, OA locations | a free key avoids the shared daily quota |
 
 One source failing never aborts a run: the failure becomes a `warnings` entry. Results are
 de-duplicated by DOI, then by title for records without one, merging the richest field of each
 copy.
 
-Set `PAPERHOUND_MAILTO` to your email: it puts Crossref/OpenAlex calls in their polite pool and
+Set `PAPERSPLEASE_MAILTO` to your email: it puts Crossref/OpenAlex calls in their polite pool and
 enables the Unpaywall open-access lookup. Without it, Unpaywall is skipped with a note rather
 than sent a fake address.
 
@@ -366,14 +426,12 @@ For every paper, in order:
 Mirror states (`ok`, `blocked`, `unreachable`) are measured from *your* machine and cached for
 ten minutes. A blocked mirror is still listed: your browser may reach what the crawler cannot.
 
-<img src="docs/screenshots/mirrors.png" alt="paperhound mirrors: one reachable mirror, one blocked, one unreachable" width="1000">
-
 `--download DIR` walks every candidate until one really is a PDF, verifying the `%PDF` magic
 bytes. It refuses to write an HTML captcha page as a `.pdf`, and reports which hosts failed
 instead of failing silently.
 
 A note on Sci-Hub, plainly: Sci-Hub distributes copyrighted papers without publisher
-permission, and its legality differs by jurisdiction. PaperHound only builds links and reports
+permission, and its legality differs by jurisdiction. PapersPlease only builds links and reports
 whether a mirror answers; it does not solve captchas or bypass blocks. It prefers legal open
 access whenever a copy exists — publishing your own work open access is the durable fix.
 
@@ -383,19 +441,20 @@ All optional, all environment variables:
 
 | variable | effect |
 |---|---|
-| `PAPERHOUND_MAILTO` | contact email: polite pools + Unpaywall |
-| `PAPERHOUND_UNPAYWALL_EMAIL` | override the Unpaywall address |
-| `PAPERHOUND_OPENALEX_KEY` | OpenAlex API key |
-| `PAPERHOUND_S2_KEY` | Semantic Scholar API key |
-| `PAPERHOUND_SCIHUB_MIRRORS` | comma-separated mirror list |
-| `PAPERHOUND_SOURCES` | default source subset |
-| `PAPERHOUND_MIN_SCOPE` | default in-scope coverage threshold |
-| `PAPERHOUND_CACHE_DIR` | HTTP cache location (default `~/.cache/paperhound`) |
-| `PAPERHOUND_NO_CACHE` | disable the HTTP cache |
-| `PAPERHOUND_LLM_KEY` / `OPENAI_API_KEY` | enable the LLM second opinion |
-| `PAPERHOUND_LLM_BASE` / `OPENAI_BASE_URL` | OpenAI-compatible endpoint |
-| `PAPERHOUND_LLM_MODEL` | model name (default `gpt-4o-mini`) |
-| `PAPERHOUND_DEBUG` | show tracebacks in the CLI |
+| `PAPERSPLEASE_MAILTO` | contact email: polite pools + Unpaywall |
+| `PAPERSPLEASE_UNPAYWALL_EMAIL` | override the Unpaywall address |
+| `PAPERSPLEASE_OPENALEX_KEY` | OpenAlex API key |
+| `PAPERSPLEASE_S2_KEY` | Semantic Scholar API key |
+| `PAPERSPLEASE_SCIHUB_MIRRORS` | comma-separated mirror list |
+| `PAPERSPLEASE_SOURCES` | default source subset |
+| `PAPERSPLEASE_MIN_SCOPE` | default in-scope coverage threshold |
+| `PAPERSPLEASE_CACHE_DIR` | HTTP cache location (default `~/.cache/papersplease`) |
+| `PAPERSPLEASE_NO_CACHE` | disable the HTTP cache |
+| `PAPERSPLEASE_LLM_KEY` / `OPENAI_API_KEY` | enable the LLM second opinion |
+| `PAPERSPLEASE_LLM_BASE` / `OPENAI_BASE_URL` | OpenAI-compatible endpoint |
+| `PAPERSPLEASE_LLM_MODEL` | model name (default `gpt-4o-mini`) |
+| `PAPERSPLEASE_DEBUG` | show tracebacks in the CLI |
+| `PAPERSPLEASE_COLOR` | `auto` (default: TTY only), `always`, `never`; `NO_COLOR=1` also disables |
 
 Calls are paced per host (Crossref ~3/s, Semantic Scholar ~1/s) and successful responses are
 cached on disk, so repeated runs are cheap and no API is hammered.
@@ -403,19 +462,20 @@ cached on disk, so repeated runs are cheap and no API is hammered.
 ## Layout
 
 ```
-paperhound/
+papersplease/
   intent.py      # intent -> facets, head concept, negation, date filters
   screening.py   # coverage scoring, specificity guards, LLM combination, ranking
+  filters.py     # author, venue, citations, publication type (after merging)
   sources.py     # Europe PMC, Crossref, arXiv, Semantic Scholar, OpenAlex
   reading.py     # abstracts and open-access full text
   resolver.py    # OA links, Sci-Hub mirrors, health probing, downloads
   pipeline.py    # search -> merge -> read -> screen -> rank -> resolve, plus explain_intent
+  ui.py          # ANSI theme, width, wrapping, colour gating
   render.py      # terminal and Markdown reports
-  cli.py         # the `paperhound` command
+  cli.py         # the `papersplease` command
   mcp_server.py  # zero-dependency MCP stdio server
-tests/           # 146 unittest cases, no network required
+tests/           # 179 unittest cases, no network required
 docs/examples/   # refs.txt and an MCP stdio session you can run
-docs/screenshots/# the images in this README, captured from real runs
 ```
 
 ## Tests
@@ -424,7 +484,7 @@ docs/screenshots/# the images in this README, captured from real runs
 python -m unittest discover -s tests
 ```
 
-146 tests, no network. They cover facet parsing, the negation rules above, date handling,
+179 tests, no network. They cover facet parsing, the negation rules above, date handling,
 specificity decisions, source payload parsing with recorded fixtures, de-duplication, mirror
 health classification, safe download, the pipeline end-to-end with fake sources, the CLI
 (including `check "intent" refs.txt`), and the MCP protocol including a real stdio round trip,
@@ -440,7 +500,7 @@ Verified in the environment this was built in:
 * Deep read: DOI `10.7717/peerj.12958` returned the Europe PMC full text (PMC8858577).
 * MCP: initialize/tools/list/tools/call over real stdio, plus the official `mcp` client, with
   the expected tool schemas, `isError` handling and protocol negotiation.
-* Packaging: fresh venv, `pip install -e .`, `paperhound --version`.
+* Packaging: fresh venv, `pip install -e .`, `papersplease --version`.
 
 Not verified here, and reported as a limitation rather than a pass:
 
@@ -449,8 +509,9 @@ Not verified here, and reported as a limitation rather than a pass:
   verification, refusal to write HTML as PDF) is unit-tested only.
 * **OpenAlex** answered `429` from this shared IP ("insufficient budget, resets at midnight
   UTC"), so its adapter was exercised with fixtures, not live traffic. A key fixes it.
-* The screenshots are real output from one machine on one day; **mirror states are
-  machine-specific** and will differ for you.
+* The renderer was checked in a pseudo-TTY (colour escapes present; `NO_COLOR` removes them)
+  and through a pipe (plain, aligned text), but **mirror states are machine-specific** and
+  will differ for you.
 
 ## Known limits
 
@@ -463,19 +524,38 @@ Not verified here, and reported as a limitation rather than a pass:
   agent's job.
 * Mirror reachability changes often. Blocked mirrors are reported, not hidden.
 
+## Shipped in 0.3 and 0.4
+
+* **Cohesive terminal renderer (0.4.0)** — one theme for every human-facing command:
+  aligned labels, colour-gated badges, wrapped reasons, capped adjacent lists and
+  matching `providers`/`mirrors` tables. Pipes and `--json` stay plain; `NO_COLOR` is
+  respected.
+* **Identifier resolution** — `read`, `download` and every MCP paper tool accept a DOI, an
+  arXiv id (`2401.12345`, `arXiv:...`, legacy ids) or an arXiv/DOI URL, not just a DOI/title.
+* **`papersplease download ID... -d DIR`** — bulk download by identifier, with the same
+  open-access → mirror fallback and `%PDF` verification as `find --download`.
+* **Merge-level filters** — `--author`, `--venue`, `--min-citations`, `--type`,
+  `--peer-reviewed`, `--preprints-only`; applied after sources merge so every source obeys
+  the same rule, with a `filters kept N of M` warning.
+* **CSL-JSON export** — `--format csljson` / `export_citations(format="csljson")`, alongside
+  BibTeX and RIS.
+* **`papersplease providers`** — which sources are enabled and which key each one needs.
+* **Renamed to PapersPlease (0.4.0)** — the distribution and CLI are both `papersplease`, a
+  name distinct from the unrelated paperhound project. See [SOURCES.md](SOURCES.md).
+
 ## Shipped in 0.2
 
 The first five roadmap items are now in the tool:
 
 
-* **Verdict and access caches** (`paperhound/store.py`): screening is a pure function of
+* **Verdict and access caches** (`papersplease/store.py`): screening is a pure function of
   paper + scope, so its result is keyed by a hash of both and reused for 30 days; access
   lookups expire after 6 hours. A repeat run reports `cache.verdict_hits` / `cache.access_hits`
   in JSON instead of paying for the same work twice. `--refresh` bypasses both.
-* **`download_paper` MCP tool** (`paperhound/resolver.py:download_best`): resolves a DOI,
+* **`download_paper` MCP tool** (`papersplease/resolver.py:download_best`): resolves a DOI,
   tries legal copies then the mirrors, and returns `saved`, `path`, the source URL that
   worked, and every failed attempt.
-* **BibTeX and RIS export** (`paperhound/export.py`): `--format bibtex|ris`, or the
+* **BibTeX and RIS export** (`papersplease/export.py`): `--format bibtex|ris`, or the
   `export_citations` MCP tool, with unique citation keys and per-author RIS records.
 * **Citation-graph expansion** (`--expand`): one hop out from the best in-scope papers via
   the Europe PMC citation API, screened like any other candidate. `citations` finds newer
@@ -499,6 +579,31 @@ Ideas worth building next, roughly in order:
 * Optional `--summarize` that asks the configured LLM for a one-paragraph evidence digest.
 
 Issues and pull requests are welcome.
+
+## How it compares
+
+Retrieval CLIs answer *“find papers matching these words.”* PapersPlease answers
+*“which of these is actually about the question, and why?”* That is why every result carries a
+bucket, matched concepts and a reason, and why a creatine trial that mentions “3 sets” in its
+methods is demoted rather than returned as a training-volume paper.
+
+It is not better at everything, and it does not try to be:
+
+* **Breadth:** the other tools query 8–20+ sources; this one ships 5 verified adapters. DBLP is
+  not included because its API served a bot challenge from this network, and an unverified
+  adapter is worse than an absent one.
+* **PDF→Markdown:** docling-based conversion (figures, equations, tables) is better than our
+  text extraction. We did not add a heavy dependency for it.
+* **Library management:** papis and cobib own that. We export BibTeX/RIS/CSL-JSON so they can.
+* **Maturity:** those projects have years of releases; this is 0.4.0.
+
+What is better here is the part the rest of the design serves: **screening precision, reasons,
+and an MCP server with zero runtime dependencies**. On the same 71 candidates, the list-intent
+anchors took the Dutch gym question from 16 in-scope papers to 4, with the tangential trials
+visible in `adjacent` and a stated reason. That is an internal before/after measurement, not a
+head-to-head benchmark.
+
+Full comparison, sources and attribution: **[SOURCES.md](SOURCES.md)**.
 
 ## License
 

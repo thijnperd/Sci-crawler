@@ -1,4 +1,4 @@
-"""PaperHound: an agent-native literature crawler.
+"""PapersPlease: an agent-native literature crawler.
 
 The pipeline is deliberately opinionated: search widely, read what you found,
 *then* decide whether each paper is actually about the thing the user asked for
@@ -21,4 +21,4 @@ __all__ = [
     "__version__",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.4.0"

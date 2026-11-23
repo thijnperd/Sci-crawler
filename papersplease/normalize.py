@@ -1,6 +1,6 @@
 """Normalise everyday wording into the English the literature is written in.
 
-A model asking PaperHound a question rarely writes a keyword query. It writes
+A model asking PapersPlease a question rarely writes a keyword query. It writes
 the user's own sentence, often in the user's own language:
 
     "optimale rep en set count en uren en schema en oefeningen in de gym
@@ -19,7 +19,7 @@ Two rules keep this from mangling an English intent:
 * the fitness shorthand map ("rep", "set count") is language-neutral and always
   applied, since it is jargon rather than another language.
 
-Every change is reported as a note, so `paperhound explain` shows exactly what
+Every change is reported as a note, so `papersplease explain` shows exactly what
 was rewritten instead of silently answering a different question.
 """
 

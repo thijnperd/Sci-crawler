@@ -2,7 +2,7 @@
 
 import unittest
 
-from paperhound.intent import exclusion_terms, parse_intent
+from papersplease.intent import exclusion_terms, parse_intent
 
 
 class FacetTests(unittest.TestCase):

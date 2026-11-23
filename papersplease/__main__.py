@@ -1,4 +1,4 @@
-"""Allow `python -m paperhound ...`."""
+"""Allow `python -m papersplease ...`."""
 
 from __future__ import annotations
 

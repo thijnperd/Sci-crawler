@@ -3,14 +3,14 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "paperhound"
-version = "0.2.0"
+name = "papersplease"
+version = "0.4.0"
 description = "An agent-native literature crawler: searches, reads, screens each paper for scope, then hands back Sci-Hub links."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "PaperHound contributors" }]
-keywords = ["literature-review", "sci-hub", "mcp", "agents", "doi", "research"]
+authors = [{ name = "PapersPlease contributors" }]
+keywords = ["literature-review", "sci-hub", "mcp", "agents", "doi", "research", "scope"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: MIT License",
@@ -25,7 +25,7 @@ dependencies = []
 pdf = ["pypdf>=4.0"]
 
 [project.scripts]
-paperhound = "paperhound.cli:main"
+papersplease = "papersplease.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["paperhound*"]
+include = ["papersplease*"]

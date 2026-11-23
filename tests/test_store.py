@@ -4,10 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from paperhound.config import Settings
-from paperhound.intent import parse_intent
-from paperhound.models import Paper, Verdict
-from paperhound.store import Caches, JsonCache, fingerprint
+from papersplease.config import Settings
+from papersplease.intent import parse_intent
+from papersplease.models import Paper, Verdict
+from papersplease.store import Caches, JsonCache, fingerprint
 
 
 def settings(tmp: str, *, cache: bool = True) -> Settings:

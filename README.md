@@ -104,15 +104,17 @@ Claude Desktop, Cursor, Codex, Continue, or a hand-rolled host:
 The server is dependency-free: it speaks the MCP stdio transport directly and negotiates
 protocol versions `2025-06-18`, `2025-03-26` and `2024-11-05`.
 
-<img src="docs/screenshots/mcp.png" alt="An MCP session: initialize, six read-only tools, and an explain_scope call" width="1000">
+<img src="docs/screenshots/mcp.png" alt="An MCP session: initialize, eight tools, and an explain_scope call" width="1000">
 
 | tool | what it does | network |
 |---|---|---|
 | `explain_scope` | parse an intent: facets, head concept, exclusions, years, source query | no |
-| `search_literature` | full pipeline: search → read → screen → rank → links | yes |
+| `search_literature` | full pipeline: search → read → screen → rank → links; optional citation-graph `expand` | yes |
 | `screen_papers` | grade papers the agent already has (title/DOI/abstract) | no |
 | `get_paper_access` | open-access + Sci-Hub links for one DOI/title, with mirror health | yes |
 | `read_paper` | metadata, abstract, and optional open-access full text | yes |
+| `download_paper` | save the first response that really is a PDF; reports path and source | yes (writes one file) |
+| `export_citations` | BibTeX or RIS for Zotero/EndNote | no |
 | `mirror_status` | which mirrors answer right now | yes |
 
 ### The agent contract
@@ -133,8 +135,9 @@ Protocol details that make life easier for hosts:
 
 * `structuredContent` mirrors the JSON text block, so MCP 2025-06-18 clients can skip
   re-parsing a string.
-* Every tool advertises `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: true`
-  and a human-readable `title`, so hosts know nothing here needs a write confirmation.
+* Every tool carries a human-readable `title` and annotations. They are `readOnlyHint: true`
+  except `download_paper`, which writes exactly one PDF into the directory the caller names
+  (`readOnlyHint: false`, `destructiveHint: false`).
 * Errors come back as `isError: true` with a one-line explanation, never as a crashed server.
 
 ---
@@ -234,8 +237,13 @@ LLM pass is for.
 | `paperhound mirrors` | mirror health, `--refresh` to bypass the 10-minute cache |
 | `paperhound mcp` | MCP server on stdio |
 
-A bare intent is treated as `find`, and `--json`/`--md`/`--out` work on `find`, `check` and
-`explain`.
+A bare intent is treated as `find`, and `--json`/`--md`/`--format`/`--out` work on `find`,
+`check` and `explain`. `--format` adds `bibtex` and `ris` next to `text`, `md` and `json`;
+citation formats export the in-scope papers only.
+
+Intents may be written in Dutch or in gym shorthand (`reps`, `set count`). A small technical
+lexicon translates them before parsing and `explain` shows both the translation and the
+result, so you can see exactly what was searched for.
 
 <img src="docs/screenshots/check.png" alt="paperhound check grading six titles into in scope, adjacent and rejected" width="1000">
 
@@ -254,6 +262,11 @@ A bare intent is treated as `find`, and `--json`/`--md`/`--out` work on `find`, 
 | `--deep`, `--deep-limit N` | read open-access full text for the top N and re-check scope |
 | `--llm` / `--no-llm` | LLM second opinion (needs `PAPERHOUND_LLM_KEY`) |
 | `--download DIR` | save the first verified PDF per in-scope paper |
+| `--require-in title\|abstract\|title_or_abstract` | where the `--require` terms must appear (literal, not thesaurus-expanded) |
+| `--expand citations\|references\|both` | walk one citation-graph hop from the best matches and screen the result |
+| `--expand-limit N` | candidates added by expansion (default 25) |
+| `--format text\|md\|json\|bibtex\|ris` | output format; `bibtex`/`ris` export in-scope papers |
+| `--refresh` | ignore cached verdicts and access lookups |
 | `--json`, `--md`, `--out FILE` | machine output, Markdown report, write to a file |
 | `--include-rejected` | include rejected papers and reasons in JSON |
 | `--no-oa`, `--no-mirror-probe` | skip open-access lookup / mirror probing |
@@ -394,7 +407,7 @@ paperhound/
   render.py      # terminal and Markdown reports
   cli.py         # the `paperhound` command
   mcp_server.py  # zero-dependency MCP stdio server
-tests/           # 103 unittest cases, no network required
+tests/           # 141 unittest cases, no network required
 docs/examples/   # refs.txt and an MCP stdio session you can run
 docs/screenshots/# the images in this README, captured from real runs
 ```
@@ -405,7 +418,7 @@ docs/screenshots/# the images in this README, captured from real runs
 python -m unittest discover -s tests
 ```
 
-103 tests, no network. They cover facet parsing, the negation rules above, date handling,
+141 tests, no network. They cover facet parsing, the negation rules above, date handling,
 specificity decisions, source payload parsing with recorded fixtures, de-duplication, mirror
 health classification, safe download, the pipeline end-to-end with fake sources, the CLI
 (including `check "intent" refs.txt`), and the MCP protocol including a real stdio round trip,
@@ -444,15 +457,39 @@ Not verified here, and reported as a limitation rather than a pass:
   agent's job.
 * Mirror reachability changes often. Blocked mirrors are reported, not hidden.
 
+## Shipped in 0.2
+
+The first five roadmap items are now in the tool:
+
+* **Verdict and access caches** (`paperhound/store.py`): screening is a pure function of
+  paper + scope, so its result is keyed by a hash of both and reused for 30 days; access
+  lookups expire after 6 hours. A repeat run reports `cache.verdict_hits` / `cache.access_hits`
+  in JSON instead of paying for the same work twice. `--refresh` bypasses both.
+* **`download_paper` MCP tool** (`paperhound/resolver.py:download_best`): resolves a DOI,
+  tries legal copies then the mirrors, and returns `saved`, `path`, the source URL that
+  worked, and every failed attempt.
+* **BibTeX and RIS export** (`paperhound/export.py`): `--format bibtex|ris`, or the
+  `export_citations` MCP tool, with unique citation keys and per-author RIS records.
+* **Citation-graph expansion** (`--expand`): one hop out from the best in-scope papers via
+  the Europe PMC citation API, screened like any other candidate. `citations` finds newer
+  work, `references` the papers it builds on.
+* **`--require-in title|abstract|title_or_abstract`**: literal field requirements on top of
+  thesaurus-backed coverage.
+
+Along the way, two real bugs surfaced and were fixed: intents were split into "sentences"
+*after* punctuation had been stripped (so every abstract was one sentence and the
+co-occurrence guard passed on keyword scatter), and boolean queries ANDed all concepts, which
+made a ten-concept question unsearchable. Source queries now use the four strongest concepts
+and screening enforces the rest.
+
 ## Roadmap
 
 Ideas worth building next, roughly in order:
 
-* Cache screening verdicts per DOI so repeated intents skip re-reading.
-* Let `get_paper_access` return a downloaded file path for agent workflows.
-* BibTeX / Zotero export from a report.
-* Feed citation-graph neighbours from the top hits back into the candidate pool.
-* A per-field `--require-in title|abstract` switch for people who care where a term appears.
+* Translate more languages (German, French, Spanish) through the same technical lexicon.
+* Parallelise `--deep` full-text reads; they are the slow part of a run.
+* Cache full-text excerpts, not just verdicts, so `--deep` repeats are cheap.
+* Optional `--summarize` that asks the configured LLM for a one-paragraph evidence digest.
 
 Issues and pull requests are welcome.
 

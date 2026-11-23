@@ -14,6 +14,7 @@ import re
 from typing import Iterable
 
 from .models import Facet, ScopeSpec
+from .normalize import normalize_intent
 
 # Words carrying no topical information. Removed outright.
 STOPWORDS = {
@@ -37,10 +38,22 @@ STOPWORDS = {
     "unrelated", "anything", "cannot", "can't", "don't", "doesn't", "didn't",
     "isn't", "aren't", "wasn't", "weren't", "won't", "wouldn't", "shouldn't",
     "couldn't", "significant", "significantly",
+    # Filler that carries no subject: "optimal rep count" is about reps, not
+    # about optimality. Age phrases are handled by _AGE_RE, not as facets.
+    "optimal", "optimum", "best", "ideal", "recommended", "recommendation",
+    "recommendations", "guideline", "guidelines", "count", "number", "many",
+    "much", "often", "type", "types", "kind", "kinds", "year", "years",
+    "old", "aged", "hours", "hour", "minutes", "times", "per", "week",
+    "weeks", "day", "days", "month", "months",
 }
 
 # Kept as facets, but worth less than a content word: these appear in most
 # abstracts and should never be enough on their own to pass screening.
+# Thesaurus groups whose name is a container word rather than the topic. They
+# stay facets (a paper should mention exercise) but at reduced weight, so a
+# verbose question does not demand that every filler noun appear.
+GENERIC_GROUPS = {"exercise", "adult", "child", "program"}
+
 GENERIC = {
     "effect", "effects", "affect", "role", "roles", "relationship", "relation",
     "association", "associations", "impact", "impacts", "influence",
@@ -62,8 +75,8 @@ _THESAURUS_GROUPS: tuple[tuple[str, ...], ...] = (
     ("weakness", "weak", "frailty", "frail", "low strength"),
     ("older", "elderly", "aged", "senior", "seniors", "old", "ageing", "aging", "advanced age"),
     ("adult", "adults", "men", "women", "volunteers", "participants", "subjects"),
-    ("resistance training", "strength training", "weight training", "resistance exercise", "resistance exercise training"),
-    ("hypertrophy", "muscle growth", "muscle mass", "lean mass", "cross-sectional area", "muscle thickness"),
+    ("resistance training", "strength training", "weight training", "resistance exercise", "resistance exercise training", "gym"),
+    ("hypertrophy", "muscle hypertrophy", "muscle growth", "muscle mass", "lean mass", "cross-sectional area", "muscle thickness"),
     ("sarcopenia", "sarcopenic", "muscle loss", "muscle wasting", "muscle atrophy", "atrophy"),
     ("exercise", "exercises", "training", "physical activity", "exercise training", "physical exercise"),
     ("grip", "handgrip", "hand grip", "grip strength", "handgrip strength"),
@@ -80,6 +93,21 @@ _THESAURUS_GROUPS: tuple[tuple[str, ...], ...] = (
     ("sleep", "circadian"),
     ("inflammation", "inflammatory", "cytokine", "cytokines"),
     ("dose", "dosing", "dosage", "dose-response"),
+    # Training variables. Grouping them keeps a verbose strength-training
+    # question at a handful of facets instead of one facet per noun, which is
+    # what made long intents impossible to satisfy.
+    ("volume", "training volume", "weekly volume", "set volume", "number of sets", "sets"),
+    ("repetition", "repetitions", "rep", "reps", "repetition range", "rep range"),
+    ("frequency", "training frequency", "weekly frequency", "sessions per week",
+     "times per week", "hours per week", "training hours", "training duration"),
+    ("program", "training program", "training programme", "training schedule",
+     "routine", "split", "periodization", "periodisation", "exercise selection",
+     "exercise order"),
+    ("intensity", "training intensity", "load intensity", "proximity to failure",
+     "repetitions in reserve", "rir", "rpe"),
+    ("rest", "rest interval", "rest period", "interset rest", "between-set rest"),
+    ("young adults", "young men", "young women", "college students",
+     "university students", "18-25", "18-30"),
 )
 
 _SYNONYM_INDEX: dict[str, tuple[str, ...]] = {}
@@ -91,6 +119,12 @@ _PHRASES = sorted(
     (p for group in _THESAURUS_GROUPS for p in group if " " in p),
     key=len,
     reverse=True,
+)
+
+# "18 years old" / "18-year-olds" is a population, not a date filter and not
+# two throwaway words; collapse it before the year regexes ever see it.
+_AGE_RE = re.compile(
+    r"\b(1[2-9]|[2-3]\d)\s*(?:-|\s)?\s*(?:year|yr)s?[\s-]*old\b", re.I
 )
 
 _YEAR = r"(?:19|20)\d{2}"
@@ -193,6 +227,13 @@ def _variants(token: str) -> list[str]:
         out.add(base)
         if not base.endswith("e"):
             out.add(base + "e")
+    # Irregulars the rule below would turn into "mans" / "childs".
+    for singular, plural in (("man", "men"), ("woman", "women"), ("child", "children"),
+                             ("foot", "feet"), ("tooth", "teeth"), ("mouse", "mice")):
+        if token == singular:
+            out.add(plural)
+        elif token == plural:
+            out.add(singular)
     if token.endswith("y") and len(token) > 3:
         out.add(token[:-1] + "ies")
     if not token.endswith(("s", "y")):
@@ -202,6 +243,11 @@ def _variants(token: str) -> list[str]:
     if token.endswith(("x", "z", "ch", "sh", "ss")):
         out.add(token + "es")
     return sorted(o for o in out if o)
+
+
+def variants(term: str) -> list[str]:
+    """Public spelling variants for strict, field-specific matching."""
+    return _variants(" ".join((term or "").lower().split())) if term else []
 
 
 def _strip_years(text: str, spec: ScopeSpec, today: _dt.date) -> str:
@@ -384,7 +430,7 @@ def exclusion_terms(term: str) -> list[str]:
     return sorted(item for item in out if item)
 
 
-def _core_facets(working: str) -> list[Facet]:
+def _core_facets(working: str) -> tuple[list[Facet], bool]:
     """The leading noun phrase of the intent, as facets, in order.
 
     Used to find the *head* concept: in "muscle strength in older adults" that
@@ -393,18 +439,25 @@ def _core_facets(working: str) -> list[Facet]:
     """
     tokens = _TOKEN_RE.findall(working.lower().replace("-", " "))
     lead: list[str] = []
+    listed = False
     started = False
     for token in tokens:
         if token in _CORE_BOUNDARY:
             if started:
                 break
             continue
+        if token in ("and", "or"):
+            # "volume and frequency" has no head noun: it is a list of
+            # variables, and pretending the last one is the head rejects
+            # papers about the others.
+            listed = listed or started
+            continue
         if token in STOPWORDS or token.isdigit() or len(token) < 2:
             continue
         started = True
         lead.append(token)
     if not lead:
-        return []
+        return [], listed
 
     joined = " ".join(lead)
     facets: list[Facet] = []
@@ -426,7 +479,7 @@ def _core_facets(working: str) -> list[Facet]:
         facet = _facet_for(token)
         if facet is not None and facet.name not in {f.name for f in facets}:
             facets.append(facet)
-    return facets
+    return facets, listed
 
 
 def _facet_for(token: str) -> Facet | None:
@@ -435,9 +488,15 @@ def _facet_for(token: str) -> Facet | None:
         terms: set[str] = set()
         for word in group:
             terms.update(_variants(word))
-        return Facet(name=group[0], terms=sorted(terms), weight=1.0, canonical=list(group))
+        weight = 0.6 if group[0] in GENERIC_GROUPS else 1.0
+        return Facet(name=group[0], terms=sorted(terms), weight=weight, canonical=list(group))
     weight = 0.5 if token in GENERIC else 1.0
     return Facet(name=token, terms=_variants(token), weight=weight)
+
+
+# Above this, one abstract can no longer plausibly cover the intent and
+# coverage becomes unattainable; the first-mentioned concepts win.
+MAX_FACETS = 10
 
 
 def parse_intent(
@@ -446,6 +505,7 @@ def parse_intent(
     min_scope: float = 0.7,
     require: Iterable[str] = (),
     exclude: Iterable[str] = (),
+    require_in: str = "",
     today: _dt.date | None = None,
 ) -> ScopeSpec:
     """Parse a free-text intent into facets, date filters and exclusions."""
@@ -455,7 +515,18 @@ def parse_intent(
         raise ValueError("intent must not be empty")
 
     spec = ScopeSpec(intent=intent, min_scope=min_scope)
-    working = _strip_years(intent, spec, today)
+    # A question written in Dutch, or in gym shorthand, is translated into the
+    # vocabulary the indexes actually contain before anything is parsed.
+    translated, language_notes = normalize_intent(intent)
+    spec.extra_notes.extend(language_notes)
+    working = _strip_years(translated, spec, today)
+    age = _AGE_RE.search(working)
+    if age:
+        working = working[: age.start()] + " young adults " + working[age.end():]
+        spec.extra_notes.append(
+            f"read '{age.group(0)}' as the population 'young adults' "
+            f"(age {int(age.group(1))})"
+        )
     working, negated, negation_notes = _extract_negations(working)
     spec.extra_notes.extend(negation_notes)
 
@@ -463,6 +534,7 @@ def parse_intent(
     # them so the query builder and the screener can use the phrase form.
     # Keep the unblanked text for head detection: see below.
     positive = working
+    spec.search_text = " ".join(positive.split())
     lowered = working.lower()
     phrase_facets: list[Facet] = []
     for phrase in _PHRASES:
@@ -472,7 +544,8 @@ def parse_intent(
             for word in group:
                 terms.update(_variants(word))
             phrase_facets.append(
-                Facet(name=group[0], terms=sorted(terms), weight=1.2,
+                Facet(name=group[0], terms=sorted(terms),
+                      weight=0.6 if group[0] in GENERIC_GROUPS else 1.2,
                       phrases=[p for p in group if " " in p],
                       canonical=list(group))
             )
@@ -496,12 +569,23 @@ def parse_intent(
         facets.append(facet)
 
     # Explicitly required concepts are always facets, whatever the wording.
-    for term in require:
-        facet = _facet_for(term.strip().lower())
+    field = (require_in or "").strip().lower()
+    if field not in {"", "title", "abstract", "title_or_abstract"}:
+        raise ValueError("require_in must be title, abstract or title_or_abstract")
+    spec.require_field = field
+    required_terms = [term.strip().lower() for term in require if term.strip()]
+    for term in required_terms:
+        facet = _facet_for(term)
         if facet and facet.name not in seen_names:
             facet.weight = max(facet.weight, 1.2)
             facets.append(facet)
             seen_names.add(facet.name)
+    if field:
+        # Literal terms, not thesaurus-expanded: "--require-in title strength"
+        # means the title must say strength, not that it may say torque.
+        spec.required = [(term, field) for term in required_terms]
+        if not required_terms:
+            spec.extra_notes.append("require_in has no effect without --require")
 
     if not facets:
         # Single generic word ("sarcopenia" is fine, "review" is not): fall back
@@ -509,11 +593,31 @@ def parse_intent(
         fallback = [t for t in _TOKEN_RE.findall(intent.lower()) if len(t) > 2]
         facets = [Facet(name=t, terms=_variants(t), weight=1.0) for t in fallback[:6]]
 
+    if len(facets) > MAX_FACETS:
+        def position(facet: Facet) -> int:
+            for term in [facet.name] + list(facet.canonical):
+                index = positive.lower().find(term.lower())
+                if index >= 0:
+                    return index
+            return len(positive)
+
+        keep = sorted(
+            sorted(range(len(facets)), key=lambda i: (-facets[i].weight, position(facets[i]), i))[
+                :MAX_FACETS
+            ]
+        )
+        dropped = [facets[i].name for i in range(len(facets)) if i not in set(keep)]
+        facets = [facets[i] for i in keep]
+        spec.extra_notes.append(
+            f"kept {len(facets)} of {len(facets) + len(dropped)} concepts, dropped "
+            f"{', '.join(dropped)} (pass --require to force one back)"
+        )
+
     spec.facets = facets
     # Detect the head from the text *before* multi-word phrases were blanked:
     # otherwise "strength training in older adults" loses its leading phrase and
     # the head silently becomes "adult".
-    core = _core_facets(positive)
+    core, listed = _core_facets(positive)
     # A head concept must also be a facet, otherwise coverage can never reach
     # the threshold no matter how relevant the paper is.
     known = {f.name for f in facets}
@@ -522,7 +626,13 @@ def parse_intent(
     # in every abstract and would defeat the specificity check.
     content = [f for f in core if f.weight >= 1.0]
     spec.core = core
-    spec.head = (content or core)[-1] if core else None
+    if listed:
+        spec.head = None
+        spec.extra_notes.append(
+            "the intent lists several concepts rather than one head noun; coverage decides scope"
+        )
+    else:
+        spec.head = (content or core)[-1] if core else None
     spec.exclude = sorted({e for e in negated if e} | {x.strip().lower() for x in exclude if x.strip()})
     if spec.year_from and spec.year_to and spec.year_from > spec.year_to:
         spec.year_from, spec.year_to = spec.year_to, spec.year_from

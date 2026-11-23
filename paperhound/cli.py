@@ -17,7 +17,7 @@ import re
 import sys
 from pathlib import Path
 
-from . import __version__
+from . import __version__, export
 from .config import Settings
 from .intent import parse_intent
 from .models import Paper
@@ -65,6 +65,13 @@ def build_parser() -> argparse.ArgumentParser:
     find_p.add_argument("--no-mirror-probe", action="store_true", help="do not test mirror reachability")
     find_p.add_argument("--include-rejected", action="store_true", help="list rejected papers in JSON")
     find_p.add_argument("--download", metavar="DIR", help="download the best PDF for each in-scope paper")
+    find_p.add_argument("--require-in", choices=("title", "abstract", "title_or_abstract"),
+                        help="where --require terms must appear (stricter than coverage)")
+    find_p.add_argument("--expand", choices=("citations", "references", "both"), default="none",
+                        help="walk one citation-graph hop from the best matches and screen the result")
+    find_p.add_argument("--expand-limit", type=int, default=25, help="candidates to add when expanding (default 25)")
+    find_p.add_argument("--format", choices=export.FORMATS, help="output format (default: text)")
+    find_p.add_argument("--refresh", action="store_true", help="ignore cached verdicts and access lookups")
     find_p.add_argument("--md", action="store_true", help="Markdown report")
     _add_common(find_p)
 
@@ -72,6 +79,10 @@ def build_parser() -> argparse.ArgumentParser:
     check_p.add_argument("intent", nargs="+", help="the research intent")
     check_p.add_argument("file", nargs="?", help="file with one DOI or title per line ('-' for stdin)")
     check_p.add_argument("--with-access", action="store_true", help="also resolve links")
+    check_p.add_argument("--require-in", choices=("title", "abstract", "title_or_abstract"),
+                         help="where --require terms must appear")
+    check_p.add_argument("--format", choices=export.FORMATS, help="output format (default: text)")
+    check_p.add_argument("--refresh", action="store_true", help="ignore cached verdicts")
     check_p.add_argument("--md", action="store_true")
     _add_common(check_p)
 
@@ -85,6 +96,8 @@ def build_parser() -> argparse.ArgumentParser:
         "explain", help="show how an intent is parsed (offline, no network)"
     )
     explain_p.add_argument("intent", nargs="+", help="the research intent to parse")
+    explain_p.add_argument("--require-in", choices=("title", "abstract", "title_or_abstract"),
+                           help="where --require terms must appear")
     _add_common(explain_p)
 
     mirrors_p = sub.add_parser("mirrors", help="report Sci-Hub mirror health")
@@ -125,6 +138,26 @@ def _safe_name(paper: Paper) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("_")[:100] + ".pdf"
 
 
+def _output(cmd: argparse.Namespace, report, *, findings=None) -> str:
+    """Pick the renderer: explicit --format, then the legacy --json/--md."""
+    fmt = cmd.format or ("json" if getattr(cmd, "json", False) else "md" if getattr(cmd, "md", False) else "text")
+    if fmt == "json":
+        return json.dumps(
+            report.to_dict(
+                abstract_chars=1000,
+                include_rejected=getattr(cmd, "include_rejected", False),
+            ),
+            ensure_ascii=False,
+            indent=2,
+        )
+    if fmt == "md":
+        return render_markdown(report)
+    if fmt in ("bibtex", "ris"):
+        papers = findings if findings is not None else report.in_scope
+        return export.render(papers, fmt)
+    return render_text(report)
+
+
 def _cmd_find(args: argparse.Namespace) -> int:
     settings = _settings(args)
     intent = " ".join(args.intent)
@@ -144,6 +177,10 @@ def _cmd_find(args: argparse.Namespace) -> int:
         until=args.until,
         probe_mirrors=not args.no_mirror_probe,
         include_oa=not args.no_oa,
+        require_in=args.require_in or "",
+        expand=args.expand,
+        expand_limit=args.expand_limit,
+        use_cache=False if args.refresh else None,
     )
 
     if args.download:
@@ -159,16 +196,7 @@ def _cmd_find(args: argparse.Namespace) -> int:
             ok, note = download_any(finding.access, str(destination), settings)
             print(f"{'saved' if ok else 'failed'}: {note}", file=sys.stderr)
 
-    if args.json:
-        output = json.dumps(
-            report.to_dict(abstract_chars=1000, include_rejected=args.include_rejected),
-            ensure_ascii=False,
-            indent=2,
-        )
-    elif args.md:
-        output = render_markdown(report)
-    else:
-        output = render_text(report)
+    output = _output(args, report)
 
     if args.out:
         Path(args.out).expanduser().write_text(output, encoding="utf-8")
@@ -234,9 +262,16 @@ def _cmd_check(args: argparse.Namespace) -> int:
         min_scope=args.min_scope,
         require=_require_list(args),
         exclude=_exclude_list(args),
+        require_in=args.require_in or "",
         with_access=args.with_access,
+        use_cache=False if args.refresh else None,
     )
-    if args.json:
+    fmt = args.format or ("json" if args.json else "md" if args.md else "text")
+    if fmt in ("bibtex", "ris"):
+        kept = [f for f in findings if f.verdict.bucket == "in_scope"]
+        print(export.render(kept, fmt), end="")
+        return 0
+    if fmt == "json":
         payload = {
             "intent": intent,
             "counts": {bucket: sum(1 for f in findings if f.verdict.bucket == bucket)
@@ -245,7 +280,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
-    if args.md:
+    if fmt == "md":
         report = Report(
             spec=parse_intent(intent, min_scope=args.min_scope or 0.7),
             findings=findings,
@@ -321,6 +356,7 @@ def _cmd_explain(args: argparse.Namespace) -> int:
         min_scope=args.min_scope,
         require=_require_list(args),
         exclude=_exclude_list(args),
+        require_in=getattr(args, "require_in", "") or "",
     )
     if args.json:
         output = json.dumps(payload, ensure_ascii=False, indent=2)
@@ -332,6 +368,11 @@ def _cmd_explain(args: argparse.Namespace) -> int:
             lines.append(f"  - {facet['name']}  weight {facet['weight']}  {terms}")
         lines.append(f"head concept: {payload['head'] or '(none)'}")
         lines.append(f"excluded: {', '.join(payload['exclude']) or '(none)'}")
+        if payload["required"]:
+            lines.append(
+                f"required in {payload['require_field']}: "
+                + ", ".join(term for term, _ in payload["required"])
+            )
         years = payload["years"]
         if years["from"] or years["to"]:
             lines.append(f"years: {years['from'] or 'any'}-{years['to'] or 'any'}")

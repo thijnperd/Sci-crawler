@@ -69,7 +69,7 @@ def fetch_fulltext(paper: Paper, settings: Settings) -> tuple[str | None, str]:
             f"{paper.pmcid}/fullTextXML"
         )
         try:
-            body = fetch(url, settings, cache_ttl=86400).decode("utf-8", "replace")
+            body = fetch(url, settings, cache_ttl=86400, timeout=20, retries=0).decode("utf-8", "replace")
             text = _strip_xml(body)
             if len(text) > 2000:
                 return text, f"Europe PMC full text ({paper.pmcid})"
@@ -96,7 +96,10 @@ def fetch_pdf_text(url: str, settings: Settings) -> tuple[str | None, str]:
     except ImportError:
         return None, "PDF reader not installed (pip install 'paperhound[pdf]')"
     try:
-        raw = fetch(url, settings, cache_ttl=86400)
+        # Publishers answer 403 to a scripted client; retrying with a 90 s
+        # timeout just makes a deep read feel hung. Fail fast, try the next
+        # source.
+        raw = fetch(url, settings, cache_ttl=86400, timeout=20, retries=0)
     except FetchError as exc:
         return None, f"PDF download failed ({exc.status or exc.message})"
     if not raw.startswith(b"%PDF"):

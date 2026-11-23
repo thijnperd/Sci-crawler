@@ -202,5 +202,37 @@ class LlmCombineTests(unittest.TestCase):
         self.assertEqual(self.verdict.bucket, before)
 
 
+class RequireInFieldTests(unittest.TestCase):
+    def setUp(self):
+        from paperhound.intent import parse_intent
+
+        self.spec = parse_intent(
+            "muscle strength in older adults", require=["strength"], require_in="title"
+        )
+
+    def test_term_present_in_title_passes(self):
+        verdict = screen_one(
+            paper("Grip strength in older adults", "Muscle strength in older adults."),
+            self.spec,
+        )
+        self.assertEqual(verdict.bucket, "in_scope")
+
+    def test_term_only_in_the_abstract_is_rejected(self):
+        verdict = screen_one(
+            paper("Grip in older adults", "Muscle strength in older adults."), self.spec
+        )
+        self.assertEqual(verdict.bucket, "out_of_scope")
+        self.assertIn("required term", verdict.reason)
+        self.assertIn("strength", verdict.reason)
+        self.assertIn("title", verdict.reason)
+
+    def test_plural_counts_as_the_same_word(self):
+        verdict = screen_one(
+            paper("Grip strengths in older adults", "Muscle strengths in older adults."),
+            self.spec,
+        )
+        self.assertNotIn("required term", verdict.reason)
+
+
 if __name__ == "__main__":
     unittest.main()

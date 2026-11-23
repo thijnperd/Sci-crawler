@@ -62,9 +62,21 @@ class ToolListingTests(unittest.TestCase):
     def test_tools_are_marked_read_only_for_hosts(self):
         tools = {tool["name"]: tool for tool in call("tools/list")["result"]["tools"]}
         for name, tool in tools.items():
-            self.assertTrue(tool["annotations"]["readOnlyHint"], name)
+            if name == "download_paper":
+                # It writes one PDF the caller asked for; still not destructive.
+                self.assertFalse(tool["annotations"]["readOnlyHint"], name)
+            else:
+                self.assertTrue(tool["annotations"]["readOnlyHint"], name)
             self.assertFalse(tool["annotations"]["destructiveHint"], name)
             self.assertTrue(tool["title"], name)
+
+    def test_new_agent_tools_are_advertised(self):
+        tools = {tool["name"]: tool for tool in call("tools/list")["result"]["tools"]}
+        self.assertIn("download_paper", tools)
+        self.assertIn("export_citations", tools)
+        self.assertIn("papers", tools["export_citations"]["inputSchema"]["required"])
+        self.assertIn("require_in", tools["search_literature"]["inputSchema"]["properties"])
+        self.assertIn("expand", tools["search_literature"]["inputSchema"]["properties"])
 
 
 class ToolCallTests(unittest.TestCase):
@@ -151,6 +163,65 @@ class ToolCallTests(unittest.TestCase):
         self.assertEqual(json.loads(result["content"][0]["text"]), result["structuredContent"])
 
 
+class NewToolTests(unittest.TestCase):
+    def test_download_requires_an_identifier(self):
+        response = call("tools/call", {"name": "download_paper", "arguments": {}})
+        self.assertTrue(response["result"]["isError"])
+        self.assertIn("doi", response["result"]["content"][0]["text"])
+
+    def test_export_ris_works_offline(self):
+        response = call(
+            "tools/call",
+            {
+                "name": "export_citations",
+                "arguments": {
+                    "format": "ris",
+                    "papers": [
+                        {
+                            "title": "Grip strength in older adults",
+                            "doi": "10.1/a",
+                            "year": 2021,
+                            "authors": ["Smith J"],
+                        }
+                    ],
+                },
+            },
+        )
+        payload = response["result"]["structuredContent"]
+        self.assertEqual(payload["count"], 1)
+        self.assertTrue(payload["text"].startswith("TY  - JOUR"))
+        self.assertIn("10.1/a", payload["text"])
+
+    def test_export_rejects_unknown_format(self):
+        response = call(
+            "tools/call",
+            {
+                "name": "export_citations",
+                "arguments": {"format": "endnote", "papers": [{"title": "x"}]},
+            },
+        )
+        self.assertTrue(response["result"]["isError"])
+        self.assertIn("bibtex", response["result"]["content"][0]["text"])
+
+    def test_screen_accepts_require_in(self):
+        response = call(
+            "tools/call",
+            {
+                "name": "screen_papers",
+                "arguments": {
+                    "intent": "muscle strength in older adults",
+                    "require": ["strength"],
+                    "require_in": "title",
+                    "papers": [
+                        {"title": "Grip in older adults", "abstract": "Muscle strength was measured."}
+                    ],
+                },
+            },
+        )
+        payload = response["result"]["structuredContent"]
+        self.assertEqual(payload["counts"]["out_of_scope"], 1)
+
+
 class StdioTransportTests(unittest.TestCase):
     def test_server_speaks_line_delimited_jsonrpc(self):
         messages = [
@@ -210,6 +281,26 @@ class CliSmokeTests(unittest.TestCase):
             os.unlink(handle.name)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("in scope", completed.stdout)
+
+    def test_check_can_export_bibtex(self):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
+        try:
+            handle.write("Grip strength in older adults\n")
+            handle.close()
+            completed = subprocess.run(
+                [
+                    sys.executable, "-m", "paperhound", "check",
+                    "muscle strength in older adults", handle.name, "--format", "bibtex",
+                ],
+                capture_output=True,
+                text=True,
+                cwd=str(REPO_ROOT),
+                timeout=60,
+            )
+        finally:
+            os.unlink(handle.name)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("@article{", completed.stdout)
 
     def test_bare_intent_is_treated_as_find(self):
         completed = subprocess.run(

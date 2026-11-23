@@ -60,7 +60,7 @@ def _query_terms(spec_facet_terms: list[str], name: str, phrases: list[str]) -> 
 
 def _boolean_query(spec: ScopeSpec, mode: str, field: str | None) -> str:
     chunks: list[str] = []
-    for facet in spec.facets:
+    for facet in spec.search_facets(4):
         terms = _query_terms(facet.terms, facet.name, facet.phrases)
         parts = []
         for term in terms:
@@ -174,7 +174,7 @@ def search_crossref(spec: ScopeSpec, settings: Settings, limit: int, mode: str =
         filters.append(f"from-pub-date:{spec.year_from}-01-01")
     if spec.year_to:
         filters.append(f"until-pub-date:{spec.year_to}-12-31")
-    query = spec.intent if mode == "and" else _boolean_query(spec, "or", None)
+    query = spec.search_text or spec.intent
     url = query_url(
         "https://api.crossref.org/works",
         {
@@ -299,7 +299,7 @@ _S2_FIELDS = (
 
 
 def search_semanticscholar(spec: ScopeSpec, settings: Settings, limit: int, mode: str = "and") -> SourceResult:
-    params = {"query": spec.intent, "limit": limit, "fields": _S2_FIELDS}
+    params = {"query": spec.search_text or spec.intent, "limit": limit, "fields": _S2_FIELDS}
     if spec.year_from or spec.year_to:
         params["year"] = f"{spec.year_from or ''}-{spec.year_to or ''}"
     url = query_url("https://api.semanticscholar.org/graph/v1/paper/search", params)
@@ -355,7 +355,7 @@ def search_openalex(spec: ScopeSpec, settings: Settings, limit: int, mode: str =
     if spec.year_to:
         filters.append(f"to_publication_date:{spec.year_to}-12-31")
     params = {
-        "search": spec.intent,
+        "search": spec.search_text or spec.intent,
         "per-page": min(limit, 200),
         "filter": ",".join(filters),
         "mailto": settings.mailto or None,
@@ -409,6 +409,98 @@ def reconstruct_abstract(inverted: dict | None) -> str | None:
         return None
     positions.sort(key=lambda pair: pair[0])
     return " ".join(word for _, word in positions)
+
+
+# --------------------------------------------------------------------------- #
+# Citation graph
+# --------------------------------------------------------------------------- #
+
+def _epmc_ident(paper: Paper) -> str | None:
+    if paper.pmid:
+        return f"MED/{paper.pmid}"
+    if paper.pmcid:
+        return f"PMC/{paper.pmcid}"
+    return None
+
+
+def relating(paper: Paper, settings: Settings, direction: str, limit: int) -> SourceResult:
+    """Papers citing, or cited by, one known paper (Europe PMC graph).
+
+    Europe PMC is the only source here that exposes the graph without a key, so
+    it is what "expand" uses. Direction is "citations" (papers that cite this
+    one: newer work on the same question) or "references" (what it built on).
+    """
+    ident = _epmc_ident(paper)
+    label = f"europepmc-{direction}"
+    if not ident:
+        return SourceResult(label, warning=(
+            f"citation expansion skipped for {paper.doi or paper.title[:40]}: no PMID/PMCID"
+        ))
+    kind = "citations" if direction == "citations" else "references"
+    url = query_url(
+        f"https://www.ebi.ac.uk/europepmc/webservices/rest/{ident}/{kind}",
+        {"format": "json", "pageSize": max(1, min(limit, 100))},
+    )
+    try:
+        data = fetch_json(url, settings, cache_ttl=86400)
+    except FetchError as exc:
+        return SourceResult(label, warning=f"Europe PMC {kind}: {exc.status or exc.message}")
+
+    container = data.get("citationList") or data.get("referenceList") or {}
+    rows = container.get("citation") or container.get("reference") or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    papers: list[Paper] = []
+    for item in rows:
+        title = clean_text(item.get("title"))
+        if not title:
+            # Reference lists frequently omit titles; without one there is
+            # nothing to screen, so do not invent a record.
+            continue
+        papers.append(
+            Paper(
+                title=title,
+                doi=norm_doi(item.get("doi")),
+                year=_int(item.get("pubYear")),
+                authors=_split_authors(item.get("authorString")),
+                journal=clean_text(item.get("journalAbbreviation")),
+                url=f"https://europepmc.org/article/{item.get('source', 'MED')}/{item.get('id')}"
+                if item.get("id") else None,
+                pmid=item.get("id") if item.get("source") == "MED" else None,
+                pmcid=item.get("id") if item.get("source") == "PMC" else None,
+                sources=[label],
+            )
+        )
+    return SourceResult(label, papers)
+
+
+def expand_citations(
+    seeds: list[Paper],
+    settings: Settings,
+    *,
+    direction: str = "citations",
+    per_seed: int = 10,
+    limit: int = 25,
+) -> tuple[list[Paper], str | None]:
+    """Walk one hop of the citation graph from the best papers found so far."""
+    found: list[Paper] = []
+    notes: list[str] = []
+    for seed in seeds:
+        if len(found) >= limit:
+            break
+        result = relating(seed, settings, direction, min(per_seed, limit - len(found)))
+        if result.warning:
+            notes.append(result.warning)
+        found.extend(result.papers)
+    deduped: dict[str, Paper] = {}
+    for paper in found:
+        key = paper.key()
+        if key in deduped:
+            deduped[key].merge(paper)
+        else:
+            deduped[key] = paper
+    note = "; ".join(dict.fromkeys(notes)) or None
+    return list(deduped.values())[:limit], note
 
 
 SEARCHERS = {

@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Sequence
 
-from . import reading, resolver, screening, sources
+from . import reading, resolver, screening, sources, store
 from .config import Settings
 from .intent import exclusion_terms, parse_intent
 from .models import Paper, ScopeSpec, Verdict, title_key
@@ -55,6 +55,8 @@ class Report:
     deep_reads: int = 0
     # How many papers passed screening, before the presentation cap.
     in_scope_total: int | None = None
+    # Verdict/access cache counters, so a caller can see a repeat run was free.
+    cache_stats: dict[str, Any] = field(default_factory=dict)
 
     def bucket(self, name: str) -> list[Finding]:
         return [f for f in self.findings if f.verdict.bucket == name]
@@ -89,6 +91,7 @@ class Report:
             "in_scope_total": self.in_scope_total if self.in_scope_total is not None else len(self.in_scope),
             "sources": self.source_counts,
             "warnings": self.warnings,
+            "cache": self.cache_stats or None,
             "results": [f.to_dict(abstract_chars=abstract_chars) for f in keep],
             "rejected": [
                 {"title": f.paper.title, "doi": f.paper.doi, "reason": f.verdict.reason,
@@ -105,6 +108,7 @@ def explain_intent(
     min_scope: float | None = None,
     require: Iterable[str] = (),
     exclude: Iterable[str] = (),
+    require_in: str = "",
     since: int | None = None,
     until: int | None = None,
 ) -> dict[str, Any]:
@@ -121,6 +125,7 @@ def explain_intent(
         min_scope=min_scope if min_scope is not None else settings.min_scope,
         require=require,
         exclude=exclude,
+        require_in=require_in,
     )
     if since:
         spec.year_from = since
@@ -129,11 +134,18 @@ def explain_intent(
     issues: list[str] = []
     if len(spec.facets) < 2:
         issues.append("only one concept was parsed; add detail or pass require=[...]")
-    if spec.head is None:
+    listed = any("lists several concepts" in note for note in spec.extra_notes)
+    if spec.head is None and not listed:
         issues.append("no head concept detected; the specificity guard is weaker")
+    if len(spec.facets) > 6:
+        issues.append(
+            f"{len(spec.facets)} concepts parsed; source queries use the 4 strongest and "
+            "screening enforces all of them"
+        )
     return {
         "schema_version": 1,
         "intent": spec.intent,
+        "search_text": spec.search_text,
         "facets": [
             {
                 "name": facet.name,
@@ -149,6 +161,8 @@ def explain_intent(
         "years": {"from": spec.year_from, "to": spec.year_to},
         "min_scope": spec.min_scope,
         "query": spec.query(),
+        "required": [list(item) for item in spec.required],
+        "require_field": spec.require_field,
         "notes": spec.extra_notes,
         "issues": issues,
         "how_to_read": (
@@ -158,6 +172,42 @@ def explain_intent(
             "before searching."
         ),
     }
+
+
+def _screen_all(papers: Sequence[Paper], spec: ScopeSpec, caches: store.Caches) -> list[Verdict]:
+    """Screen papers, reusing a stored verdict when the paper and scope match."""
+    verdicts: list[Verdict] = []
+    for paper in papers:
+        cached = caches.get_verdict(spec, paper.key())
+        if cached is not None:
+            verdicts.append(cached)
+            continue
+        verdict = screening.screen_one(paper, spec)
+        caches.put_verdict(spec, paper.key(), verdict)
+        verdicts.append(verdict)
+    return verdicts
+
+
+def _access(
+    paper: Paper,
+    settings: Settings,
+    caches: store.Caches,
+    *,
+    probe: bool,
+    include_oa: bool,
+) -> resolver.Access:
+    """Resolve links, reusing a recent answer for the same DOI."""
+    if paper.doi:
+        raw = caches.get_access(paper.doi)
+        if raw:
+            try:
+                return resolver.Access(**raw)
+            except TypeError:
+                pass
+    access = resolver.access_for(paper, settings, probe=probe, include_oa=include_oa)
+    if paper.doi:
+        caches.put_access(paper.doi, access.to_dict())
+    return access
 
 
 def merge_papers(papers: Iterable[Paper]) -> list[Paper]:
@@ -261,6 +311,10 @@ def find(
     probe_mirrors: bool = True,
     include_oa: bool = True,
     access_limit: int | None = None,
+    require_in: str = "",
+    expand: str = "none",
+    expand_limit: int = 25,
+    use_cache: bool | None = None,
     searchers: dict[str, Searcher] | None = None,
 ) -> Report:
     """Run the full pipeline for one research intent."""
@@ -271,6 +325,7 @@ def find(
         min_scope=min_scope if min_scope is not None else settings.min_scope,
         require=require,
         exclude=exclude,
+        require_in=require_in,
     )
     if since:
         spec.year_from = since
@@ -285,6 +340,7 @@ def find(
     )
     merged = merge_papers(papers)
     report = Report(spec=spec, warnings=warnings, source_counts=counts, candidates=len(merged))
+    caches = store.Caches(settings, enabled=use_cache)
 
     # Read: fill in missing abstracts before judging anything.
     if merged:
@@ -295,7 +351,44 @@ def find(
             except Exception as exc:  # pragma: no cover - defensive
                 report.warnings.append(f"read failed for {paper.doi or paper.title[:40]}: {exc}")
 
-    verdicts = screening.screen_many(merged, spec)
+    verdicts = _screen_all(merged, spec, caches)
+
+    # Citation-graph expansion: one hop out from the best on-target papers
+    # finds newer work (citations) and foundational work (references) that no
+    # keyword query surfaced, then screens it like everything else.
+    if expand in ("citations", "references", "both") and merged:
+        seeds = [
+            paper for paper, verdict in screening.rank(merged, verdicts)
+            if verdict.bucket == "in_scope"
+        ][:4]
+        directions = ["citations", "references"] if expand == "both" else [expand]
+        extra: list[Paper] = []
+        for direction in directions:
+            found, note = sources.expand_citations(
+                seeds, settings, direction=direction, limit=max(5, expand_limit)
+            )
+            extra.extend(found)
+            if note:
+                report.warnings.append(note)
+        known = {p.key() for p in merged}
+        known_titles = {title_key(p.title) for p in merged}
+        fresh = [
+            p for p in merge_papers(extra)
+            if p.key() not in known and title_key(p.title) not in known_titles
+        ]
+        if fresh:
+            for paper in [p for p in fresh if not p.abstract][: max(12, expand_limit)]:
+                try:
+                    reading.read(paper, settings)
+                except Exception:  # a missing abstract must not end the run
+                    continue
+            merged.extend(fresh)
+            verdicts.extend(_screen_all(fresh, spec, caches))
+            report.candidates = len(merged)
+            report.warnings.append(
+                f"citation expansion ({expand}) added {len(fresh)} candidates "
+                f"from {len(seeds)} seed paper(s)"
+            )
 
     llm_counts = use_llm if use_llm is not None else settings.llm_enabled
     if llm_counts and settings.llm_enabled and merged:
@@ -366,8 +459,8 @@ def find(
         if finding.verdict.bucket == "out_of_scope" or resolved >= access_limit:
             continue
         try:
-            finding.access = resolver.access_for(
-                finding.paper, settings, probe=probe_mirrors, include_oa=include_oa
+            finding.access = _access(
+                finding.paper, settings, caches, probe=probe_mirrors, include_oa=include_oa
             )
             if finding.access.notes:
                 report.warnings.extend(finding.access.notes)
@@ -376,6 +469,8 @@ def find(
             report.warnings.append(f"access lookup failed for {finding.paper.doi}: {exc}")
 
     report.findings = findings
+    caches.flush()
+    report.cache_stats = caches.stats()
     # De-duplicate warnings while preserving order.
     seen: set[str] = set()
     report.warnings = [w for w in report.warnings if not (w in seen or seen.add(w))]
@@ -391,7 +486,9 @@ def screen_only(
     min_scope: float | None = None,
     require: Iterable[str] = (),
     exclude: Iterable[str] = (),
+    require_in: str = "",
     with_access: bool = False,
+    use_cache: bool | None = None,
 ) -> list[Finding]:
     """Screen papers the caller already has (e.g. from a reference list)."""
     settings = settings or Settings.from_env()
@@ -400,8 +497,10 @@ def screen_only(
         min_scope=min_scope if min_scope is not None else settings.min_scope,
         require=require,
         exclude=exclude,
+        require_in=require_in,
     )
-    verdicts = screening.screen_many(papers, spec)
+    caches = store.Caches(settings, enabled=use_cache)
+    verdicts = _screen_all(papers, spec, caches)
     if (use_llm if use_llm is not None else settings.llm_enabled) and settings.llm_enabled:
         shortlist = [(i, p) for i, (p, v) in enumerate(zip(papers, verdicts)) if v.coverage >= 0.2][:48]
         llm_map, _ = screening.llm_screen([p for _, p in shortlist], spec, settings)
@@ -412,7 +511,10 @@ def screen_only(
     findings = [Finding(paper=p, verdict=v) for p, v in ranked]
     if with_access:
         for finding in findings:
-            finding.access = resolver.access_for(finding.paper, settings)
+            finding.access = _access(
+                finding.paper, settings, caches, probe=True, include_oa=True
+            )
+    caches.flush()
     return findings
 
 

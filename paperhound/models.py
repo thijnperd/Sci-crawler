@@ -128,6 +128,9 @@ class ScopeSpec:
     """A parsed research intent: what the user wants, and what disqualifies."""
 
     intent: str
+    # The intent in the English the indexes contain (translated when needed).
+    # Free-text search endpoints use this; facets are what screening enforces.
+    search_text: str = ""
     facets: list[Facet] = field(default_factory=list)
     # The head noun of the leading phrase ("strength" in "muscle strength in
     # older adults"). A paper must contain it to count as on-target: coverage
@@ -139,9 +142,29 @@ class ScopeSpec:
     year_to: int | None = None
     min_scope: float = 0.7
     extra_notes: list[str] = field(default_factory=list)
+    # (term, field) pairs the caller demanded by name, e.g. "strength" in the
+    # title only. Unlike facets these are literal, not thesaurus-expanded.
+    required: list[tuple[str, str]] = field(default_factory=list)
+    require_field: str = ""
 
     def facet_names(self) -> list[str]:
         return [f.name for f in self.facets]
+
+    def search_facets(self, limit: int = 4) -> list[Facet]:
+        """The strongest concepts to put in a source query.
+
+        Boolean APIs AND their clauses, so a ten-concept question literally
+        ANDed returns nothing. Query the few content-bearing concepts and let
+        screening enforce the rest -- that is what the screener is for.
+        """
+        chosen: list[Facet] = []
+        for facet in sorted(self.facets, key=lambda f: -f.weight):
+            if facet.name not in {c.name for c in chosen}:
+                chosen.append(facet)
+            if len(chosen) >= limit:
+                break
+        order = {facet.name: index for index, facet in enumerate(self.facets)}
+        return sorted(chosen, key=lambda facet: order[facet.name])
 
     def query(self, mode: str = "and", fields: Iterable[str] = ()) -> str:
         """Build a source query string from the facets.
@@ -151,12 +174,11 @@ class ScopeSpec:
         """
         joiner = " AND " if mode == "and" else " OR "
         chunks: list[str] = []
-        for facet in self.facets:
-            # Prefer the curated synonyms over generated plurals, and keep the
-            # query to single words: an unquoted multi-word term is an AND in
-            # most of these APIs and would narrow the search unpredictably.
-            curated = [word for word in (facet.canonical or facet.terms) if " " not in word]
-            words = (curated or facet.terms)[:6]
+        for facet in self.search_facets(4):
+            # Curated synonyms beat generated plurals; quote multi-word terms
+            # so an API treats them as a phrase instead of an implicit AND.
+            curated = (facet.canonical or facet.terms)[:5]
+            words = [f'"{word}"' if " " in word else word for word in curated]
             chunks.append("(" + " OR ".join(words) + ")")
         # Exclusions are applied during screening, not in the source query: a
         # paper that mentions the excluded concept at all is disqualified, and
@@ -178,6 +200,8 @@ class ScopeSpec:
             "year_to": self.year_to,
             "min_scope": self.min_scope,
             "notes": self.extra_notes,
+            "required": [list(item) for item in self.required],
+            "require_field": self.require_field,
         }
 
 

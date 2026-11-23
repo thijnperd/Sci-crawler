@@ -21,7 +21,7 @@ import re
 from typing import Any, Iterable, Sequence
 
 from .config import Settings
-from .intent import exclusion_terms
+from .intent import exclusion_terms, variants
 from .models import Paper, ScopeSpec, Verdict
 from .net import FetchError, fetch
 
@@ -65,7 +65,13 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
     # Deep reads add full-text prose; screen against everything we have read.
     body = f"{abstract} {excerpt}".strip()
     keywords = normalize(" ; ".join(paper.keywords + paper.concepts))
-    sentences = ([title] if title else []) + [s for s in _SENTENCE_SPLIT.split(body) if s]
+    # Split *before* normalising: normalise() strips the punctuation that marks
+    # sentence boundaries, which turned every abstract into one long sentence
+    # and made the co-occurrence guard pass on keyword scatter.
+    raw_sentences = [paper.title or ""] + _SENTENCE_SPLIT.split(paper.abstract or "")
+    if paper.excerpt:
+        raw_sentences += _SENTENCE_SPLIT.split(paper.excerpt)
+    sentences = [normalize(item) for item in raw_sentences if item and item.strip()]
 
     total_weight = sum(f.weight for f in spec.facets) or 1.0
     matched_weight = 0.0
@@ -136,6 +142,11 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
             (head_name in best_sentence_facets and len(best_sentence_facets) >= 2)
             or (head_name in title_hits and len(title_hits) >= 2)
         )
+    elif len(spec.facets) >= 2:
+        # A list of variables has no head noun, but the same anti-scatter rule
+        # applies: two of the concepts must be discussed together somewhere,
+        # not sprinkled one per paragraph.
+        cooccur = len(best_sentence_facets) >= 2 or len(title_hits) >= 2
     # A facet and an exclusion may share a word ("muscle strength not about
     # muscle mass"); only an exact facet-name collision is ignored, so the
     # narrower excluded phrase still applies.
@@ -165,6 +176,33 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
         verdict.bucket = "out_of_scope"
         verdict.reason = verdict.excluded_reason
         return verdict
+
+    # Required-in-field: the caller asked for a term by name in a given part of
+    # the record ("the title must say strength"), which is stricter than the
+    # thesaurus-backed facet coverage above.
+    if spec.required:
+        missing_required: list[str] = []
+        for term, field in spec.required:
+            haystacks = []
+            if field in ("title", "title_or_abstract"):
+                haystacks.append(title)
+            if field in ("abstract", "title_or_abstract"):
+                haystacks.append(body)
+            if not any(
+                _hit(_pattern(spelling), text)
+                for spelling in variants(term)
+                for text in haystacks
+            ):
+                missing_required.append(term)
+        if missing_required:
+            where = "title" if field == "title" else "abstract" if field == "abstract" else "title or abstract"
+            verdict.excluded_reason = (
+                f"required term(s) absent from the {where}: " + ", ".join(missing_required)
+            )
+            verdict.bucket = "out_of_scope"
+            verdict.in_scope = False
+            verdict.reason = verdict.excluded_reason
+            return verdict
 
     if (
         coverage >= spec.min_scope

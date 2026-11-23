@@ -1,0 +1,65 @@
+"""BibTeX and RIS export."""
+
+import unittest
+
+from paperhound.export import to_bibtex, to_ris
+from paperhound.models import Paper, Verdict
+from paperhound.pipeline import Finding
+
+
+def finding(**kwargs) -> Finding:
+    paper = Paper(
+        title=kwargs.pop("title", "Effects of resistance training volume on hypertrophy"),
+        doi=kwargs.pop("doi", "10.1000/abc"),
+        year=kwargs.pop("year", 2021),
+        authors=kwargs.pop("authors", ["Schoenfeld Brad", "Grgic Jozo"]),
+        journal=kwargs.pop("journal", "Journal of Strength Research"),
+    )
+    verdict = Verdict(
+        doi=paper.doi, title=paper.title, score=0.9, coverage=0.9,
+        title_coverage=0.8, bucket="in_scope", in_scope=True,
+    )
+    return Finding(paper=paper, verdict=verdict)
+
+
+class BibtexTests(unittest.TestCase):
+    def test_entry_has_the_fields_a_latex_user_needs(self):
+        text = to_bibtex([finding()])
+        self.assertTrue(text.startswith("@article{"))
+        self.assertIn("title = {Effects of resistance training volume on hypertrophy}", text)
+        self.assertIn("author = {Schoenfeld Brad and Grgic Jozo}", text)
+        self.assertIn("year = {2021}", text)
+        self.assertIn("doi = {10.1000/abc}", text)
+        self.assertTrue(text.rstrip().endswith("}"))
+
+    def test_keys_are_unique_for_same_author_and_year(self):
+        text = to_bibtex([finding(), finding(title="Another paper on sets")])
+        keys = [line.split("{", 1)[1].rstrip(",") for line in text.splitlines() if line.startswith("@article{")]
+        self.assertEqual(len(keys), 2)
+        self.assertEqual(len(set(keys)), 2)
+
+    def test_ampersands_are_escaped(self):
+        self.assertIn(r"\&", to_bibtex([finding(title="Sets & reps")]))
+
+    def test_empty_list_is_empty_output(self):
+        self.assertEqual(to_bibtex([]), "")
+
+
+class RisTests(unittest.TestCase):
+    def test_record_has_type_authors_and_end(self):
+        lines = to_ris([finding()]).splitlines()
+        self.assertEqual(lines[0], "TY  - JOUR")
+        self.assertIn("TI  - Effects of resistance training volume on hypertrophy", lines)
+        self.assertIn("AU  - Schoenfeld Brad", lines)
+        self.assertIn("AU  - Grgic Jozo", lines)
+        self.assertIn("DO  - 10.1000/abc", lines)
+        self.assertIn("ER  - ", lines)
+
+    def test_two_records(self):
+        text = to_ris([finding(), finding(doi="10.1000/def")])
+        self.assertEqual(text.count("TY  - JOUR"), 2)
+        self.assertEqual(text.count("ER  - "), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

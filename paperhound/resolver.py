@@ -215,6 +215,45 @@ def access_for(
     return result
 
 
+def download_best(
+    access: Access,
+    destination: str,
+    settings: Settings,
+    *,
+    include_scihub: bool = True,
+) -> dict:
+    """Try every candidate until one really is a PDF; report which one worked."""
+    candidates = [item["url"] for item in access.open_access]
+    if include_scihub:
+        candidates += [
+            link["url"] for link in access.scihub if link.get("state") in ("ok", "unchecked")
+        ]
+    seen: set[str] = set()
+    attempts: list[str] = []
+    for url in candidates:
+        if url in seen:
+            continue
+        seen.add(url)
+        ok, note = download(url, destination, settings)
+        host = urllib.parse.urlsplit(url).netloc
+        if ok:
+            return {
+                "saved": True,
+                "path": destination,
+                "source": url,
+                "note": note,
+                "attempts": attempts + [f"{host}: ok"],
+            }
+        attempts.append(f"{host}: {note}")
+    return {
+        "saved": False,
+        "path": None,
+        "source": None,
+        "note": "; ".join(attempts[:3]) or "no downloadable source",
+        "attempts": attempts[:6],
+    }
+
+
 def download_any(
     access: Access,
     destination: str,
@@ -227,22 +266,12 @@ def download_any(
     Landing pages, XML and captcha HTML all fail the magic-byte check, so this
     walks the list instead of trusting whichever link looked best.
     """
-    candidates = [item["url"] for item in access.open_access]
-    if include_scihub:
-        candidates += [
-            link["url"] for link in access.scihub if link.get("state") in ("ok", "unchecked")
-        ]
-    seen: set[str] = set()
-    errors: list[str] = []
-    for url in candidates:
-        if url in seen:
-            continue
-        seen.add(url)
-        ok, note = download(url, destination, settings)
-        if ok:
-            return True, note
-        errors.append(f"{urllib.parse.urlsplit(url).netloc}: {note}")
-    return False, "; ".join(errors[:3]) or "no downloadable source"
+    result = download_best(
+        access, destination, settings, include_scihub=include_scihub
+    )
+    if result["saved"]:
+        return True, result["note"]
+    return False, result["note"]
 
 
 def download(url: str, destination: str, settings: Settings) -> tuple[bool, str]:

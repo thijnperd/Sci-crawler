@@ -154,7 +154,7 @@ def fetch(
                     delay = 1.6 * (attempt + 1)
                 time.sleep(min(delay, 8.0))
                 continue
-            raise FetchError(url, exc.code, str(exc.reason)) from None
+            raise FetchError(url, exc.code, str(exc.reason) or f"HTTP {exc.code}") from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last_error = exc
             if attempt < retries:

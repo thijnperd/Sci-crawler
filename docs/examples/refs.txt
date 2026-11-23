@@ -1,0 +1,7 @@
+# One DOI or title per line. `paperhound check` grades each against the intent.
+Grip strength and physical function in older adults
+Age-related muscle mass loss in older adults
+Resistance training and muscle strength in older adults
+Muscle fibre type composition in mammalian tissue
+Effects of protein supplementation on muscle mass in the elderly
+Handgrip strength predicts mortality in older adults

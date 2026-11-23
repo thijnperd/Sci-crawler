@@ -202,6 +202,59 @@ class LlmCombineTests(unittest.TestCase):
         self.assertEqual(self.verdict.bucket, before)
 
 
+class ListIntentAnchorTests(unittest.TestCase):
+    """A list of variables must be screened like a topic, not a checklist."""
+
+    INTENT = (
+        "optimale rep en set count en uren en schema en oefeningen in de gym "
+        "voor man 18 jaar oud voor spiergroei"
+    )
+
+    def setUp(self):
+        self.spec = parse_intent(self.INTENT)
+
+    def test_tangential_trial_is_demoted(self):
+        # A creatine trial that recorded sets, reps and sessions can reach 70%
+        # coverage by mentioning every variable once in its methods. It must not
+        # pass as a paper about training variables.
+        verdict = screen_one(
+            paper(
+                "Creatine supplementation and resistance training adaptations in older men",
+                "Participants performed resistance training with 3 sets of 10 repetitions, "
+                "3 sessions per week for 8 weeks. Muscle mass and strength increased in young and older men.",
+            ),
+            self.spec,
+        )
+        self.assertGreaterEqual(verdict.coverage, 0.7)
+        self.assertNotEqual(verdict.bucket, "in_scope")
+        self.assertIn("title", verdict.reason)
+
+    def test_outcome_only_title_is_demoted(self):
+        # One anchor (the outcome) in the title is not enough: supplement
+        # studies measure hypertrophy without studying training volume.
+        verdict = screen_one(
+            paper(
+                "Vegan and Omnivorous High Protein Diets Support Comparable Skeletal Muscle Hypertrophy",
+                "Participants completed resistance training: 3 sets of 10 repetitions, "
+                "3 sessions per week. Muscle mass and strength increased.",
+            ),
+            self.spec,
+        )
+        self.assertNotEqual(verdict.bucket, "in_scope")
+        self.assertIn("title names", verdict.reason)
+
+    def test_paper_naming_a_key_concept_in_the_title_passes(self):
+        verdict = screen_one(
+            paper(
+                "Weekly resistance training volume and frequency for muscle hypertrophy in young men",
+                "Volume progressed from 10 to 20 sets per muscle per week over three sessions per week. "
+                "Muscle thickness and lean mass increased in young men.",
+            ),
+            self.spec,
+        )
+        self.assertEqual(verdict.bucket, "in_scope")
+
+
 class RequireInFieldTests(unittest.TestCase):
     def setUp(self):
         from paperhound.intent import parse_intent

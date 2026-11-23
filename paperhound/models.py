@@ -146,6 +146,11 @@ class ScopeSpec:
     # title only. Unlike facets these are literal, not thesaurus-expanded.
     required: list[tuple[str, str]] = field(default_factory=list)
     require_field: str = ""
+    # For intents that list several concepts instead of naming one head noun:
+    # the highest-weighted topic concepts. A paper must cover at least two and
+    # name one of them in its title, so a supplement trial that happened to
+    # record "sets" and "sessions per week" cannot pass as a training paper.
+    anchors: list[str] = field(default_factory=list)
 
     def facet_names(self) -> list[str]:
         return [f.name for f in self.facets]
@@ -186,7 +191,7 @@ class ScopeSpec:
         query = joiner.join(chunks) or self.intent
         if fields:
             field = next(iter(fields))
-            query = joiner.join(f"{field}:{c}" for c in chunks) if chunks else self.intent
+            query = joiner.join(f"{field}:{c}" for c in chunks) if chunks else f"{field}:{self.intent}"
         return query
 
     def to_dict(self) -> dict[str, Any]:
@@ -202,6 +207,7 @@ class ScopeSpec:
             "notes": self.extra_notes,
             "required": [list(item) for item in self.required],
             "require_field": self.require_field,
+            "anchors": self.anchors,
         }
 
 

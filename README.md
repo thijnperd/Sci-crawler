@@ -157,7 +157,7 @@ paper about muscle *mass*, so the head concept is checked separately.
 | `adult` | adult, adults, men, women, volunteers, participants, subjects |
 
 `coverage = matched facet weight ÷ total facet weight`. Generic words ("effect", "study",
-"patients") carry half weight. Title matches count more than abstract matches, and a sentence
+"patients") and container concepts ("exercise", "program") carry reduced weight. Title matches count more than abstract matches, and a sentence
 that contains several facets earns a proximity bonus:
 
 ```
@@ -165,13 +165,19 @@ score = 0.72 × coverage + 0.18 × title_coverage + 0.10 × proximity
 score ×= 0.78 if the title names no facet
 ```
 
-Three guards turn that score into a verdict:
+Four guards turn that score into a verdict:
 
 1. **Coverage ≥ `--min-scope`** (default `0.70`) and at least two facets matched.
 2. **Head concept present.** No `strength`, no "in scope" — however much muscle the paper
    mentions.
 3. **Co-occurrence.** For multi-concept intents the head must appear *with* another concept in
    one sentence or in the title. Keywords scattered across an abstract are not a topic.
+4. **Anchors for list-style intents.** When the intent lists variables instead of naming one
+   head noun ("sets and frequency for hypertrophy"), the leading variables become anchors;
+   the outcome after "for" and the population are excluded, because every tangential study
+   measures the outcome. A paper must cover both anchors and name at least one in its
+   **title**. Without this, a creatine trial that recorded "3 sets, 3 sessions per week"
+   reaches 70% coverage from its methods paragraph and passes as a training paper.
 
 | paper | coverage | head `strength`? | verdict |
 |---|---|---|---|
@@ -407,7 +413,7 @@ paperhound/
   render.py      # terminal and Markdown reports
   cli.py         # the `paperhound` command
   mcp_server.py  # zero-dependency MCP stdio server
-tests/           # 141 unittest cases, no network required
+tests/           # 146 unittest cases, no network required
 docs/examples/   # refs.txt and an MCP stdio session you can run
 docs/screenshots/# the images in this README, captured from real runs
 ```
@@ -418,7 +424,7 @@ docs/screenshots/# the images in this README, captured from real runs
 python -m unittest discover -s tests
 ```
 
-141 tests, no network. They cover facet parsing, the negation rules above, date handling,
+146 tests, no network. They cover facet parsing, the negation rules above, date handling,
 specificity decisions, source payload parsing with recorded fixtures, de-duplication, mirror
 health classification, safe download, the pipeline end-to-end with fake sources, the CLI
 (including `check "intent" refs.txt`), and the MCP protocol including a real stdio round trip,
@@ -460,6 +466,7 @@ Not verified here, and reported as a limitation rather than a pass:
 ## Shipped in 0.2
 
 The first five roadmap items are now in the tool:
+
 
 * **Verdict and access caches** (`paperhound/store.py`): screening is a pure function of
   paper + scope, so its result is keyed by a hash of both and reused for 30 days; access

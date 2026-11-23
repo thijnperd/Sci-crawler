@@ -22,6 +22,14 @@ def finding(**kwargs) -> Finding:
     return Finding(paper=paper, verdict=verdict)
 
 
+class PlainPaperTests(unittest.TestCase):
+    def test_export_accepts_papers_without_a_verdict(self):
+        paper = Paper(title="Sets and reps", doi="10.1/x", year=2020, authors=["Doe Jane"])
+        self.assertIn("@article{", to_bibtex([paper]))
+        self.assertIn("TY  - JOUR", to_ris([paper]))
+        self.assertIn("DO  - 10.1/x", to_ris([paper]))
+
+
 class BibtexTests(unittest.TestCase):
     def test_entry_has_the_fields_a_latex_user_needs(self):
         text = to_bibtex([finding()])

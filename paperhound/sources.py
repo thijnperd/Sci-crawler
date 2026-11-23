@@ -50,25 +50,9 @@ def _int(value: object) -> int | None:
     return year if 1800 < year < 2200 else None
 
 
-def _query_terms(spec_facet_terms: list[str], name: str, phrases: list[str]) -> list[str]:
-    ordered: list[str] = [name]
-    for candidate in phrases + spec_facet_terms:
-        if candidate not in ordered:
-            ordered.append(candidate)
-    return ordered[:4]
-
-
 def _boolean_query(spec: ScopeSpec, mode: str, field: str | None) -> str:
-    chunks: list[str] = []
-    for facet in spec.search_facets(4):
-        terms = _query_terms(facet.terms, facet.name, facet.phrases)
-        parts = []
-        for term in terms:
-            quoted = f'"{term}"' if " " in term else term
-            parts.append(f"{field}:{quoted}" if field else quoted)
-        chunks.append("(" + " OR ".join(parts) + ")")
-    joiner = " AND " if mode == "and" else " OR "
-    return joiner.join(chunks) if chunks else (spec.intent if not field else f"{field}:{spec.intent}")
+    """The facet query, shared with the CLI/JSON contract so they cannot drift."""
+    return spec.query(mode, [field] if field else ())
 
 
 # --------------------------------------------------------------------------- #

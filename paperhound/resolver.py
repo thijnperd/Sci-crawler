@@ -8,6 +8,7 @@ deterministically: it knows which mirrors answer from here, builds the canonical
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 import urllib.parse
@@ -43,6 +44,16 @@ class MirrorStatus:
             "note": self.note,
             "usable": self.usable,
         }
+
+
+def filename_for(paper: Paper) -> str:
+    """A safe, readable filename for a paper's PDF (one implementation)."""
+    surname = ""
+    if paper.authors:
+        surname = re.split(r"[ ,]", paper.authors[0].strip())[0]
+    tail = (paper.doi or paper.title)[-40:]
+    stem = f"{paper.year or 'nd'}_{surname}_{tail}"
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("_")[:100] + ".pdf"
 
 
 def doi_url(doi: str) -> str:

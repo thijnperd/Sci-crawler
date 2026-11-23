@@ -16,13 +16,14 @@ from __future__ import annotations
 import json
 import sys
 import traceback
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from . import __version__, export
 from .config import Settings
 from .models import Paper
 from .pipeline import explain_intent, find, read_one, screen_only
-from .resolver import access_for, download_best, mirror_health
+from .resolver import access_for, download_best, filename_for, mirror_health
 from .sources import fetch_by_doi, find_by_title
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -252,29 +253,16 @@ def _tool_read(settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _filename(paper: Paper) -> str:
-    import re as _re
-    from pathlib import Path as _Path
-
-    surname = ""
-    if paper.authors:
-        surname = _re.split(r"[ ,]", paper.authors[0].strip())[0]
-    tail = (paper.doi or paper.title)[-40:]
-    stem = f"{paper.year or 'nd'}_{surname}_{tail}"
-    return _re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("_")[:100] + ".pdf"
-
-
 def _tool_download(settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
     """Resolve a paper, try its legal copies then the mirrors, save one PDF."""
-    from pathlib import Path
-
     paper = _resolve_paper(settings, args)
     directory = Path(str(args.get("directory") or settings.cache_dir / "downloads")).expanduser()
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise ToolError(f"cannot create {directory}: {exc}") from None
-    name = str(args.get("filename") or "").strip() or _filename(paper)
+    # An agent-supplied filename is a path component, never a path.
+    name = Path(str(args.get("filename") or "").strip()).name or filename_for(paper)
     destination = directory / name
     access = access_for(paper, settings, probe=_as_bool(args.get("probe_mirrors"), True))
     outcome = download_best(access, str(destination), settings)
@@ -299,29 +287,11 @@ def _tool_export(settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
     if fmt not in ("bibtex", "ris"):
         raise ToolError("'format' must be bibtex or ris")
     papers = _papers_from(args.get("papers"))
-    from .pipeline import Finding
-    from .models import Verdict
-
-    findings = [
-        Finding(
-            paper=paper,
-            verdict=Verdict(
-                doi=paper.doi,
-                title=paper.title,
-                score=1.0,
-                coverage=1.0,
-                title_coverage=1.0,
-                bucket="in_scope",
-                in_scope=True,
-            ),
-        )
-        for paper in papers
-    ]
-    text = export.render(findings, fmt)
+    text = export.render(papers, fmt)
     return {
         "schema_version": 1,
         "format": fmt,
-        "count": len(findings),
+        "count": len(papers),
         "text": text,
         "hint": "Paste into a .bib file, or save as .ris and import into Zotero/EndNote.",
     }

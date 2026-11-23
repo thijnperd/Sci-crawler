@@ -163,13 +163,15 @@ def explain_intent(
         "query": spec.query(),
         "required": [list(item) for item in spec.required],
         "require_field": spec.require_field,
+        "anchors": spec.anchors,
         "notes": spec.extra_notes,
         "issues": issues,
         "how_to_read": (
             "facets are the concepts coverage is computed over; head is the concept that "
-            "must be present and must co-occur with another; exclude lists hard disqualifiers "
-            "(and the spellings each one catches); issues lists parse problems worth fixing "
-            "before searching."
+            "must be present and must co-occur with another; anchors are the key concepts of "
+            "a list-style intent (two must be covered, two named in the title); exclude lists "
+            "hard disqualifiers (and the spellings each one catches); issues lists parse "
+            "problems worth fixing before searching."
         ),
     }
 

@@ -53,8 +53,6 @@ _DUTCH_MAP: dict[str, str] = {
     "schema": "training program",
     "herhalingen": "repetitions",
     "herhaling": "repetition",
-    "set count": "number of sets",
-    "rep count": "repetitions",
     "rust": "rest interval",
     "frequentie": "frequency",
     "intensiteit": "intensity",

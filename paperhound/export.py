@@ -14,6 +14,7 @@ import re
 import unicodedata
 from typing import Iterable, Sequence
 
+from .models import Paper
 from .pipeline import Finding
 
 _ASCII = re.compile(r"[^a-z0-9]+")
@@ -32,8 +33,11 @@ def _surname(author: str) -> str:
     return _ascii(parts[0]) if parts else "anon"
 
 
-def _key(finding: Finding, used: set[str]) -> str:
-    paper = finding.paper
+def _paper(item: Finding | Paper) -> Paper:
+    return item.paper if isinstance(item, Finding) else item
+
+
+def _key(paper: Paper, used: set[str]) -> str:
     stem = (_surname(paper.authors[0]) if paper.authors else "anon")[:18]
     year = str(paper.year or "nd")
     word = ""
@@ -57,12 +61,12 @@ def _escape_bib(value: str | None) -> str:
     return " ".join(text.split())
 
 
-def to_bibtex(findings: Sequence[Finding]) -> str:
+def to_bibtex(items: Sequence[Finding | Paper]) -> str:
     """One @article per paper, ready for \\bibliography."""
     used: set[str] = set()
     blocks: list[str] = []
-    for finding in findings:
-        paper = finding.paper
+    for item in items:
+        paper = _paper(item)
         fields = [
             ("title", _escape_bib(paper.title)),
             ("author", " and ".join(_escape_bib(a) for a in paper.authors) or None),
@@ -71,7 +75,7 @@ def to_bibtex(findings: Sequence[Finding]) -> str:
             ("doi", paper.doi),
             ("url", paper.url),
         ]
-        lines = [f"@article{{{_key(finding, used)},"]
+        lines = [f"@article{{{_key(paper, used)},"]
         body = [f"  {name} = {{{value}}}," for name, value in fields if value]
         if body:
             body[-1] = body[-1].rstrip(",")
@@ -81,11 +85,11 @@ def to_bibtex(findings: Sequence[Finding]) -> str:
     return "\n\n".join(blocks) + ("\n" if blocks else "")
 
 
-def to_ris(findings: Sequence[Finding]) -> str:
+def to_ris(items: Sequence[Finding | Paper]) -> str:
     """RIS records, importable by Zotero, EndNote and Mendeley."""
     blocks: list[str] = []
-    for finding in findings:
-        paper = finding.paper
+    for item in items:
+        paper = _paper(item)
         lines = ["TY  - JOUR", f"TI  - {paper.title}"]
         for author in paper.authors:
             lines.append(f"AU  - {author}")
@@ -95,7 +99,7 @@ def to_ris(findings: Sequence[Finding]) -> str:
             lines.append(f"PY  - {paper.year}")
         if paper.doi:
             lines.append(f"DO  - {paper.doi}")
-        for url in _urls(finding):
+        for url in _urls(item):
             lines.append(f"UR  - {url}")
         if paper.abstract:
             lines.append("AB  - " + " ".join(paper.abstract.split())[:2000])
@@ -104,22 +108,25 @@ def to_ris(findings: Sequence[Finding]) -> str:
     return "\n".join(blocks)
 
 
-def _urls(finding: Finding) -> Iterable[str]:
-    if finding.access:
-        if finding.access.doi_url:
-            yield finding.access.doi_url
-        if finding.access.best and finding.access.best.get("url"):
-            yield finding.access.best["url"]
-    elif finding.paper.url:
-        yield finding.paper.url
+def _urls(item: Finding | Paper) -> Iterable[str]:
+    if isinstance(item, Finding):
+        if item.access:
+            if item.access.doi_url:
+                yield item.access.doi_url
+            if item.access.best and item.access.best.get("url"):
+                yield item.access.best["url"]
+        elif item.paper.url:
+            yield item.paper.url
+    elif item.url:
+        yield item.url
 
 
 FORMATS = ("text", "md", "json", "bibtex", "ris")
 
 
-def render(findings: Sequence[Finding], fmt: str) -> str:
+def render(items: Sequence[Finding | Paper], fmt: str) -> str:
     if fmt == "bibtex":
-        return to_bibtex(findings)
+        return to_bibtex(items)
     if fmt == "ris":
-        return to_ris(findings)
+        return to_ris(items)
     raise ValueError(f"unsupported citation format: {fmt}")

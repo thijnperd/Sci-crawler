@@ -54,6 +54,11 @@ STOPWORDS = {
 # verbose question does not demand that every filler noun appear.
 GENERIC_GROUPS = {"exercise", "adult", "child", "program"}
 
+# Population words bound who a paper studied, not what it is about. They keep
+# their facet (the population still has to match) but never become the anchor
+# concepts of a list-style intent.
+POPULATION_GROUPS = {"adult", "child", "young adults", "older"}
+
 GENERIC = {
     "effect", "effects", "affect", "role", "roles", "relationship", "relation",
     "association", "associations", "impact", "impacts", "influence",
@@ -439,6 +444,9 @@ def _core_facets(working: str) -> tuple[list[Facet], bool]:
     """
     tokens = _TOKEN_RE.findall(working.lower().replace("-", " "))
     lead: list[str] = []
+    # The raw leading phrase, stopwords included: multi-word concepts live in
+    # it ("hours per week" is frequency), and filtering first would split them.
+    raw: list[str] = []
     listed = False
     started = False
     for token in tokens:
@@ -452,14 +460,17 @@ def _core_facets(working: str) -> tuple[list[Facet], bool]:
             # papers about the others.
             listed = listed or started
             continue
-        if token in STOPWORDS or token.isdigit() or len(token) < 2:
+        if not started and (token in STOPWORDS or token.isdigit() or len(token) < 2):
             continue
         started = True
+        raw.append(token)
+        if token in STOPWORDS or token.isdigit() or len(token) < 2:
+            continue
         lead.append(token)
     if not lead:
         return [], listed
 
-    joined = " ".join(lead)
+    joined = " ".join(raw)
     facets: list[Facet] = []
     consumed: set[str] = set()
     for phrase in _PHRASES:
@@ -468,7 +479,8 @@ def _core_facets(working: str) -> tuple[list[Facet], bool]:
             if words & consumed:
                 continue
             facets.append(
-                Facet(name=_SYNONYM_INDEX[phrase][0], terms=_phrase_terms(phrase), weight=1.2,
+                Facet(name=_SYNONYM_INDEX[phrase][0], terms=_phrase_terms(phrase),
+                      weight=0.6 if _SYNONYM_INDEX[phrase][0] in GENERIC_GROUPS else 1.2,
                       phrases=[p for p in _SYNONYM_INDEX[phrase] if " " in p],
                       canonical=list(_SYNONYM_INDEX[phrase]))
             )
@@ -628,8 +640,19 @@ def parse_intent(
     spec.core = core
     if listed:
         spec.head = None
+        # No head noun to anchor on, so anchor on the variables the question is
+        # about -- the leading phrase, not the goal after "for". In "sets and
+        # frequency for hypertrophy" the anchors are sets and frequency; the
+        # outcome (hypertrophy) is what every tangential training study
+        # measures, so it is exactly the wrong thing to anchor on.
+        pool = [f for f in core if f.name not in POPULATION_GROUPS]
+        if len(pool) < 2:
+            pool = [f for f in facets if f.name not in POPULATION_GROUPS]
+        top = max((f.weight for f in pool), default=0.0)
+        spec.anchors = [f.name for f in pool if f.weight >= top and top > 0][:4]
         spec.extra_notes.append(
-            "the intent lists several concepts rather than one head noun; coverage decides scope"
+            "the intent lists several concepts rather than one head noun; "
+            f"anchors: {', '.join(spec.anchors) or '(none)'}"
         )
     else:
         spec.head = (content or core)[-1] if core else None

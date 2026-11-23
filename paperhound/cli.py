@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -23,7 +22,7 @@ from .intent import parse_intent
 from .models import Paper
 from .pipeline import Report, explain_intent, find, read_one, screen_only
 from .render import render_markdown, render_text
-from .resolver import access_for, mirror_health
+from .resolver import access_for, filename_for, mirror_health
 from .sources import fetch_by_doi, find_by_title
 
 _COMMANDS = {"find", "check", "read", "explain", "mirrors", "mcp"}
@@ -129,16 +128,7 @@ def _exclude_list(args: argparse.Namespace) -> list[str]:
     return values
 
 
-def _safe_name(paper: Paper) -> str:
-    surname = ""
-    if paper.authors:
-        surname = re.split(r"[ ,]", paper.authors[0].strip())[0]
-    tail = (paper.doi or paper.title)[-40:]
-    stem = f"{paper.year or 'nd'}_{surname}_{tail}"
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("_")[:100] + ".pdf"
-
-
-def _output(cmd: argparse.Namespace, report, *, findings=None) -> str:
+def _output(cmd: argparse.Namespace, report) -> str:
     """Pick the renderer: explicit --format, then the legacy --json/--md."""
     fmt = cmd.format or ("json" if getattr(cmd, "json", False) else "md" if getattr(cmd, "md", False) else "text")
     if fmt == "json":
@@ -153,8 +143,7 @@ def _output(cmd: argparse.Namespace, report, *, findings=None) -> str:
     if fmt == "md":
         return render_markdown(report)
     if fmt in ("bibtex", "ris"):
-        papers = findings if findings is not None else report.in_scope
-        return export.render(papers, fmt)
+        return export.render(report.in_scope, fmt)
     return render_text(report)
 
 
@@ -192,7 +181,7 @@ def _cmd_find(args: argparse.Namespace) -> int:
             if not finding.access:
                 print(f"no PDF source for {finding.paper.doi or finding.paper.title[:50]}", file=sys.stderr)
                 continue
-            destination = target_dir / _safe_name(finding.paper)
+            destination = target_dir / filename_for(finding.paper)
             ok, note = download_any(finding.access, str(destination), settings)
             print(f"{'saved' if ok else 'failed'}: {note}", file=sys.stderr)
 
@@ -367,6 +356,8 @@ def _cmd_explain(args: argparse.Namespace) -> int:
             terms = ", ".join(facet["terms"][:8])
             lines.append(f"  - {facet['name']}  weight {facet['weight']}  {terms}")
         lines.append(f"head concept: {payload['head'] or '(none)'}")
+        if payload["anchors"]:
+            lines.append(f"anchors (2 covered, 1 in title): {', '.join(payload['anchors'])}")
         lines.append(f"excluded: {', '.join(payload['exclude']) or '(none)'}")
         if payload["required"]:
             lines.append(

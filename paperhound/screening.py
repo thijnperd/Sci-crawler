@@ -147,6 +147,23 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
         # applies: two of the concepts must be discussed together somewhere,
         # not sprinkled one per paragraph.
         cooccur = len(best_sentence_facets) >= 2 or len(title_hits) >= 2
+    # Anchor concepts: for list-style intents, a tangential paper (a creatine
+    # trial that happened to record sets and sessions per week) can still reach
+    # 70% weighted coverage by mentioning every variable once. Requiring two of
+    # the top concepts *and* one of them in the title is what separates "this
+    # paper studies volume" from "this paper mentions volume".
+    anchor_ok = True
+    anchor_hits: list[str] = []
+    title_anchors: list[str] = []
+    if len(spec.anchors) >= 2:
+        anchor_hits = [name for name in spec.anchors if name in matched]
+        title_anchors = [name for name in spec.anchors if name in title_hits]
+        # The variables must be covered, and at least one must be named in the
+        # title. A supplement trial measures the outcome and records sets and
+        # sessions in its methods; it does not put "volume" in its title, and
+        # that is the difference between studying a variable and logging it.
+        needed = min(2, len(spec.anchors))
+        anchor_ok = len(anchor_hits) >= needed and bool(title_anchors)
     # A facet and an exclusion may share a word ("muscle strength not about
     # muscle mass"); only an exact facet-name collision is ignored, so the
     # narrower excluded phrase still applies.
@@ -195,7 +212,7 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
             ):
                 missing_required.append(term)
         if missing_required:
-            where = "title" if field == "title" else "abstract" if field == "abstract" else "title or abstract"
+            where = spec.require_field.replace("_", " ") or "requested field"
             verdict.excluded_reason = (
                 f"required term(s) absent from the {where}: " + ", ".join(missing_required)
             )
@@ -209,6 +226,7 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
         and len(matched) >= min(2, len(spec.facets))
         and head_present
         and cooccur
+        and anchor_ok
     ):
         verdict.bucket = "in_scope"
         verdict.in_scope = True
@@ -224,6 +242,15 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
         bits.append(f"head concept '{spec.head.name}' absent")
     if head_present and not cooccur and head_name:
         bits.append(f"'{head_name}' never appears with the other concepts in one sentence")
+    if not anchor_ok:
+        missing_anchors = [name for name in spec.anchors if name not in matched]
+        if missing_anchors:
+            bits.append("anchor concepts missing: " + ", ".join(missing_anchors))
+        if not title_anchors:
+            bits.append(
+                "title names none of the anchor concepts ("
+                + ", ".join(spec.anchors) + "); need at least one"
+            )
     if matched:
         bits.append("matched " + ", ".join(matched))
     if missing:

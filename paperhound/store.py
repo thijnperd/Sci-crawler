@@ -28,11 +28,15 @@ from .models import ScopeSpec, Verdict
 
 VERDICT_TTL = 30 * 24 * 3600.0
 ACCESS_TTL = 6 * 3600.0
+# Bump when the screening rules change: a cached verdict is only valid for the
+# rules that produced it, so the version is part of the cache key.
+SCREENING_VERSION = 2
 
 
 def fingerprint(spec: ScopeSpec) -> str:
     """A stable hash of everything that can change a verdict."""
     payload = {
+        "screening": SCREENING_VERSION,
         "intent": spec.intent,
         "facets": [(f.name, sorted(f.terms), f.weight) for f in spec.facets],
         "head": spec.head.name if spec.head else None,
@@ -41,6 +45,7 @@ def fingerprint(spec: ScopeSpec) -> str:
         "min_scope": spec.min_scope,
         "required": [list(item) for item in spec.required],
         "require_field": spec.require_field,
+        "anchors": spec.anchors,
     }
     return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 

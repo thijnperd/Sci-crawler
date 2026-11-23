@@ -68,6 +68,15 @@ class DutchIntentParsingTests(unittest.TestCase):
         self.assertIsNone(self.spec.head)
         self.assertIn("lists several concepts", " ".join(self.spec.extra_notes))
 
+    def test_anchors_are_the_variables_not_the_outcome_or_population(self):
+        # The question is about sets, reps and frequency *for* muscle growth.
+        # Hypertrophy is the goal every tangential training study measures, so
+        # it must not be an anchor; the variables are what the paper is about.
+        self.assertEqual(set(self.spec.anchors), {"volume", "frequency"})
+        self.assertNotIn("hypertrophy", self.spec.anchors)
+        self.assertNotIn("young adults", self.spec.anchors)
+        self.assertNotIn("adult", self.spec.anchors)
+
     def test_query_uses_english_terms(self):
         query = self.spec.query()
         self.assertIn("hypertrophy", query)

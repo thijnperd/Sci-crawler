@@ -36,7 +36,7 @@ from .render import (
 from .resolver import access_for, download_best, filename_for, mirror_health
 from .sources import SOURCE_INFO, arxiv_id, fetch_by_arxiv, fetch_by_doi, resolve_identifier
 
-_COMMANDS = {"find", "check", "read", "download", "explain", "providers", "mirrors", "mcp"}
+_COMMANDS = {"find", "check", "read", "download", "explain", "providers", "mirrors", "tui", "mcp"}
 
 
 def _add_common(
@@ -51,6 +51,8 @@ def _add_common(
                         help="coverage required to count as in scope (default 0.7)")
     screen.add_argument("--require", action="append", default=[],
                         help="concept that must be present (repeatable)")
+    screen.add_argument("--require-in", choices=("title", "abstract", "title_or_abstract"),
+                        help="where --require terms must appear")
     screen.add_argument("--exclude", action="append", default=[],
                         help="concept that disqualifies a paper (repeatable)")
     output.add_argument("--json", action="store_true", help="machine-readable output")
@@ -123,6 +125,8 @@ def build_parser() -> argparse.ArgumentParser:
     access.add_argument("--download", metavar="DIR", help="download the best PDF for each in-scope paper")
 
     output = find_p.add_argument_group("output")
+    output.add_argument("-i", "--interactive", action="store_true",
+                        help="open results in the interactive in-place terminal UI")
     output.add_argument("--format", choices=export.FORMATS, help="output format (default: text)")
     output.add_argument("--md", action="store_true", help="Markdown report")
     output.add_argument("--include-rejected", action="store_true", help="list rejected papers in JSON")
@@ -133,8 +137,6 @@ def build_parser() -> argparse.ArgumentParser:
     check_p.add_argument("intent", nargs="+", help="the research intent")
     check_p.add_argument("file", nargs="?", help="file with one DOI or title per line ('-' for stdin)")
     check_p.add_argument("--with-access", action="store_true", help="also resolve links")
-    check_p.add_argument("--require-in", choices=("title", "abstract", "title_or_abstract"),
-                         help="where --require terms must appear")
     check_p.add_argument("--format", choices=export.FORMATS, help="output format (default: text)")
     check_p.add_argument("--refresh", action="store_true", help="ignore cached verdicts")
     check_p.add_argument("--md", action="store_true")
@@ -165,13 +167,14 @@ def build_parser() -> argparse.ArgumentParser:
         "explain", help="show how an intent is parsed (offline, no network)"
     )
     explain_p.add_argument("intent", nargs="+", help="the research intent to parse")
-    explain_p.add_argument("--require-in", choices=("title", "abstract", "title_or_abstract"),
-                           help="where --require terms must appear")
     _add_common(explain_p)
 
     mirrors_p = sub.add_parser("mirrors", help="report Sci-Hub mirror health")
     mirrors_p.add_argument("--json", action="store_true")
     mirrors_p.add_argument("--refresh", action="store_true", help="ignore the 10-minute cache")
+
+    tui_p = sub.add_parser("tui", help="launch the interactive in-place terminal UI")
+    tui_p.add_argument("intent", nargs="*", help="optional starting research intent")
 
     sub.add_parser("mcp", help="run the MCP server on stdio (for AI agents)")
     return parser
@@ -225,32 +228,50 @@ def _cmd_find(args: argparse.Namespace) -> int:
     settings = _settings(args)
     intent = " ".join(args.intent)
     sources = [s.strip() for s in args.sources.split(",")] if args.sources else None
-    with ui.progress("searching sources and screening"):
+    find_kwargs = dict(
+        limit=args.limit,
+        source_names=sources,
+        deep=args.deep,
+        deep_limit=args.deep_limit,
+        use_llm=args.use_llm,
+        min_scope=args.min_scope,
+        require=_require_list(args),
+        exclude=_exclude_list(args),
+        since=args.since,
+        until=args.until,
+        authors=args.author,
+        venues=args.venue,
+        min_citations=args.min_citations,
+        types=args.type or (),
+        peer_reviewed=args.peer_reviewed,
+        preprints_only=args.preprints_only,
+        probe_mirrors=not args.no_mirror_probe,
+        include_oa=not args.no_oa,
+        require_in=args.require_in or "",
+        expand=args.expand,
+        expand_limit=args.expand_limit,
+        use_cache=False if args.refresh else None,
+    )
+
+    wants_tui = (
+        getattr(args, "interactive", False)
+        and not args.json
+        and not args.md
+        and not args.format
+        and not args.out
+        and not args.download
+    )
+    if wants_tui and ui.vt_enabled(sys.stdout) and getattr(sys.stdin, "isatty", lambda: False)():
+        from .tui import run_tui
+
+        return run_tui(settings=settings, initial_intent=intent, find_kwargs=find_kwargs)
+
+    with ui.live_panel("live pipeline", f'"{intent}"') as panel:
         report = find(
             intent,
             settings=settings,
-            limit=args.limit,
-            source_names=sources,
-            deep=args.deep,
-            deep_limit=args.deep_limit,
-            use_llm=args.use_llm,
-            min_scope=args.min_scope,
-            require=_require_list(args),
-            exclude=_exclude_list(args),
-            since=args.since,
-            until=args.until,
-            authors=args.author,
-            venues=args.venue,
-            min_citations=args.min_citations,
-            types=args.type or (),
-            peer_reviewed=args.peer_reviewed,
-            preprints_only=args.preprints_only,
-            probe_mirrors=not args.no_mirror_probe,
-            include_oa=not args.no_oa,
-            require_in=args.require_in or "",
-            expand=args.expand,
-            expand_limit=args.expand_limit,
-            use_cache=False if args.refresh else None,
+            on_progress=panel.event,
+            **find_kwargs,
         )
 
     if args.download:
@@ -491,6 +512,16 @@ def _cmd_mirrors(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_tui(args: argparse.Namespace) -> int:
+    from .tui import run_tui
+
+    if not ui.vt_enabled(sys.stdout) or not getattr(sys.stdin, "isatty", lambda: False)():
+        print("papersplease tui requires an interactive terminal", file=sys.stderr)
+        return 1
+    intent = " ".join(args.intent) if getattr(args, "intent", None) else ""
+    return run_tui(settings=Settings.from_env(), initial_intent=intent)
+
+
 def _cmd_mcp(_: argparse.Namespace) -> int:
     from .mcp_server import serve
 
@@ -505,6 +536,7 @@ HANDLERS = {
     "explain": _cmd_explain,
     "providers": _cmd_providers,
     "mirrors": _cmd_mirrors,
+    "tui": _cmd_tui,
     "mcp": _cmd_mcp,
 }
 
@@ -516,6 +548,10 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] not in _COMMANDS and not argv[0].startswith("-"):
         argv.insert(0, "find")
     if not argv:
+        if ui.vt_enabled(sys.stdout) and getattr(sys.stdin, "isatty", lambda: False)():
+            from .tui import run_tui
+
+            return run_tui(settings=Settings.from_env())
         parser.print_help()
         return 0
     args = parser.parse_args(argv)

@@ -87,10 +87,16 @@ Result   4 in scope (showing 2)  ·  1 adjacent  ·  1 rejected  ·  from 71 can
   title names none of the anchor concepts (volume, frequency); volume missing
 ```
 
-Colour is automatic only on a TTY. `NO_COLOR=1` or `PAPERSPLEASE_COLOR=never` disables it,
+Colour is automatic only on a TTY (including Windows `cmd.exe`, where Virtual Terminal mode is
+enabled automatically). `NO_COLOR=1` or `PAPERSPLEASE_COLOR=never` disables it,
 `PAPERSPLEASE_COLOR=always` forces it, and pipes plus `--json` stay free of escape codes.
-Search, read, download and mirror checks show a one-line spinner on **stderr** while they
-wait, so stdout stays clean for pipes.
+During `find`, an in-place live stage panel on **stderr** shows per-source hit counts and stage
+progress without scrolling, then clears cleanly before printing the report.
+
+For an interactive in-place terminal browser (split-pane results, live refinement, one-key PDF
+download, browser open, BibTeX/RIS/Markdown export, mirror health, and offline scope explain),
+run `papersplease` with no arguments, `papersplease tui`, or `papersplease find "..." -i`.
+
 `--out` writes plain, 96-column text. The same renderer drives `explain`, `check`, `read`,
 `providers`, `mirrors` and `download`, so the layout does not change from command to command.
 `papersplease --help` ends with runnable examples.

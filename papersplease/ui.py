@@ -17,35 +17,100 @@ import time
 from dataclasses import dataclass
 from typing import TextIO
 
-_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 _CODES = {
     "bold": "\033[1m",
     "dim": "\033[2m",
+    "reverse": "\033[7m",
     "cyan": "\033[36m",
     "green": "\033[32m",
     "yellow": "\033[33m",
     "red": "\033[31m",
     "magenta": "\033[35m",
+    "white": "\033[37m",
+    "blue": "\033[34m",
     "reset": "\033[0m",
 }
+
+_WIN_VT_CACHE: dict[int, bool] = {}
 
 
 def _stream(stream: TextIO | None = None) -> TextIO:
     return stream if stream is not None else sys.stdout
 
 
+def _enable_windows_vt(stream: TextIO | None = None) -> bool:
+    """Enable ANSI Virtual Terminal Processing on Windows conhost/cmd.exe.
+
+    On Windows 10/11 legacy cmd.exe, ANSI escapes render as raw ``←[1m`` unless
+    ``ENABLE_VIRTUAL_TERMINAL_PROCESSING`` (0x0004) is enabled on the console
+    handle. Returns True when VT sequences are supported on ``stream``.
+    """
+    target = _stream(stream)
+    if not getattr(target, "isatty", lambda: False)():
+        return False
+    if sys.platform != "win32":
+        return True
+
+    handle_id = -12 if target is sys.stderr else -11
+    if handle_id in _WIN_VT_CACHE:
+        return _WIN_VT_CACHE[handle_id]
+
+    ok = False
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.GetStdHandle(handle_id)
+        if handle and handle != -1:
+            mode = ctypes.c_uint32()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                vt_flag = 0x0004  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+                if mode.value & vt_flag:
+                    ok = True
+                elif kernel32.SetConsoleMode(handle, mode.value | vt_flag):
+                    ok = True
+    except Exception:
+        ok = False
+
+    if not ok and (
+        os.environ.get("WT_SESSION")
+        or os.environ.get("ANSICON")
+        or os.environ.get("TERM_PROGRAM")
+        or os.environ.get("TERM", "").lower().startswith(("xterm", "vt", "ansi", "screen", "tmux"))
+    ):
+        ok = True
+
+    _WIN_VT_CACHE[handle_id] = ok
+    return ok
+
+
+def vt_enabled(stream: TextIO | None = None) -> bool:
+    """True when ``stream`` is a TTY that understands ANSI VT escape codes."""
+    if os.environ.get("TERM", "").lower() == "dumb":
+        return False
+    return _enable_windows_vt(stream)
+
+
 def color_enabled(stream: TextIO | None = None) -> bool:
-    """Resolve the colour mode: explicit env var, NO_COLOR, then TTY."""
+    """Resolve the colour mode: explicit env var, NO_COLOR, then TTY + VT."""
     mode = os.environ.get("PAPERSPLEASE_COLOR", "auto").strip().lower()
     if mode in {"never", "0", "false", "no", "off"}:
         return False
     if mode in {"always", "1", "true", "yes", "on"}:
+        if sys.platform == "win32":
+            _enable_windows_vt(stream)
         return True
     if "NO_COLOR" in os.environ:
         return False
     if os.environ.get("TERM", "").lower() == "dumb":
         return False
-    return bool(getattr(_stream(stream), "isatty", lambda: False)())
+    target = _stream(stream)
+    if not getattr(target, "isatty", lambda: False)():
+        return False
+    if sys.platform == "win32":
+        return _enable_windows_vt(target)
+    return True
 
 
 def unicode_enabled(stream: TextIO | None = None) -> bool:
@@ -112,6 +177,252 @@ def progress(label: str, *, stream: TextIO | None = None) -> Progress:
     return Progress(label, stream=stream)
 
 
+class LivePanel:
+    """An in-place, bordered live stage dashboard on stderr (TTY + VT only).
+
+    Redraws in the exact same terminal position using ANSI cursor-up + clear,
+    showing live per-source hit counts and stage checkmarks, then cleanly
+    erases itself before the final report prints. Completely silent off-TTY.
+    """
+
+    def __init__(
+        self,
+        title: str,
+        subtitle: str = "",
+        stages: list[tuple[str, str]] | None = None,
+        *,
+        stream: TextIO | None = None,
+        clear_on_exit: bool = True,
+    ):
+        self.title = title
+        self.subtitle = subtitle
+        self.stream = stream or sys.stderr
+        self.clear_on_exit = clear_on_exit
+        self.enabled = vt_enabled(self.stream)
+        self.theme = Theme(enabled=color_enabled(self.stream), unicode=unicode_enabled(self.stream))
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._started = time.monotonic()
+        self._frame = 0
+        self._last_lines = 0
+        self._stages: list[dict[str, str]] = [
+            {"key": key, "label": label, "state": "pending", "detail": ""}
+            for key, label in (
+                stages
+                or [
+                    ("parse", "Parse intent"),
+                    ("search", "Search sources"),
+                    ("read", "Read abstracts"),
+                    ("screen", "Screen scope"),
+                    ("access", "Resolve access"),
+                ]
+            )
+        ]
+        self._sources: dict[str, str] = {}
+
+    def _stage(self, key: str) -> dict[str, str] | None:
+        for item in self._stages:
+            if item["key"] == key:
+                return item
+        return None
+
+    def set_stage(self, key: str, state: str, detail: str = "") -> None:
+        with self._lock:
+            item = self._stage(key)
+            if item is None:
+                item = {"key": key, "label": key.title(), "state": state, "detail": detail}
+                self._stages.append(item)
+            else:
+                item["state"] = state
+                if detail or state != "running":
+                    item["detail"] = detail
+
+    def event(self, stage: str, data: dict) -> None:
+        """Pipeline progress callback: updates stage states and source chips."""
+        with self._lock:
+            if stage == "parse":
+                facets = " + ".join(data.get("facets") or [])
+                years = ""
+                if data.get("year_from") or data.get("year_to"):
+                    years = f" ({data.get('year_from') or 'any'}-{data.get('year_to') or 'any'})"
+                item = self._stage("parse")
+                if item:
+                    item["state"] = "done"
+                    item["detail"] = (facets or "parsed") + years
+            elif stage == "search_start":
+                for name in data.get("sources") or []:
+                    self._sources.setdefault(name, "running")
+                item = self._stage("search")
+                if item:
+                    item["state"] = "running"
+                    item["detail"] = self._format_sources()
+            elif stage == "source_done":
+                name = str(data.get("source") or "")
+                count = int(data.get("count") or 0)
+                ok = bool(data.get("ok", True))
+                self._sources[name] = f"ok:{count}" if ok else f"warn:{count}"
+                item = self._stage("search")
+                if item:
+                    item["state"] = "running"
+                    item["detail"] = self._format_sources()
+            elif stage == "search_done":
+                item = self._stage("search")
+                if item:
+                    item["state"] = "done"
+                    cands = int(data.get("candidates") or 0)
+                    chips = self._format_sources()
+                    item["detail"] = f"{cands} candidates  {chips}".strip()
+            elif stage == "read":
+                done = int(data.get("done") or 0)
+                total = int(data.get("total") or 0)
+                item = self._stage("read")
+                if item:
+                    item["state"] = "done" if (total == 0 or done >= total) else "running"
+                    item["detail"] = f"{done}/{total} abstracts" if total else "all abstracts present"
+            elif stage == "screen_done":
+                item = self._stage("screen")
+                if item:
+                    item["state"] = "done"
+                    sep = self.theme.sep
+                    item["detail"] = (
+                        f"{data.get('in_scope', 0)} in scope {sep} "
+                        f"{data.get('adjacent', 0)} adjacent {sep} "
+                        f"{data.get('out_of_scope', 0)} rejected"
+                    )
+            elif stage == "access":
+                done = int(data.get("done") or 0)
+                total = int(data.get("total") or 0)
+                item = self._stage("access")
+                if item:
+                    item["state"] = "done" if (total == 0 or done >= total) else "running"
+                    item["detail"] = f"{done}/{total} links" if total else "no links needed"
+            elif stage == "done":
+                for item in self._stages:
+                    if item["state"] == "running":
+                        item["state"] = "done"
+
+    def _format_sources(self) -> str:
+        parts: list[str] = []
+        spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] if self.theme.unicode else ["-", "\\", "|", "/"]
+        spin = spinner[self._frame % len(spinner)]
+        for name, status in self._sources.items():
+            short = name.replace("semanticscholar", "s2").replace("europepmc", "epmc")
+            if status == "running":
+                parts.append(f"{short} {self.theme.cyan(spin)}")
+            elif status.startswith("ok:"):
+                count = status.split(":", 1)[1]
+                parts.append(f"{short} {self.theme.green(self.theme.check + count)}")
+            else:
+                count = status.split(":", 1)[1]
+                parts.append(f"{short} {self.theme.yellow('!' + count)}")
+        return "  ".join(parts)
+
+    def render_lines(self, width: int | None = None) -> list[str]:
+        width = width or terminal_width(minimum=64, maximum=96)
+        inner = max(40, width - 4)
+        t = self.theme
+        elapsed = f"{time.monotonic() - self._started:4.1f}s"
+        tl, tr, bl, br, h, v = ("╭", "╮", "╰", "╯", "─", "│") if t.unicode else ("+", "+", "+", "+", "-", "|")
+        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] if t.unicode else ["-", "\\", "|", "/"]
+        spin = frames[self._frame % len(frames)]
+
+        head_left = f" {t.paint('PapersPlease', 'bold', 'cyan')} {t.dim(t.sep)} {t.dim(self.title)} "
+        head_right = f" {t.dim(elapsed)} "
+        fill_len = max(1, width - 2 - visible_len(head_left) - visible_len(head_right))
+        top = t.dim(tl + h) + head_left + t.dim(h * max(1, fill_len - 1)) + head_right + t.dim(tr)
+
+        def box_line(content: str) -> str:
+            vis = visible_len(content)
+            if vis > inner:
+                # Truncate plain fallback safely
+                content = truncate(_ANSI.sub("", content), inner)
+                vis = visible_len(content)
+            pad = " " * max(0, inner - vis)
+            return f"{t.dim(v)} {content}{pad} {t.dim(v)}"
+
+        lines = [top]
+        if self.subtitle:
+            lines.append(box_line(t.bold(truncate(self.subtitle, inner))))
+            lines.append(box_line(""))
+
+        label_w = max((len(s["label"]) for s in self._stages), default=12) + 2
+        for stage in self._stages:
+            st = stage["state"]
+            if st == "done":
+                glyph = t.green(t.check)
+                lbl = t.bold(stage["label"].ljust(label_w))
+            elif st == "running":
+                glyph = t.cyan(spin)
+                lbl = t.cyan(stage["label"].ljust(label_w))
+            elif st == "error":
+                glyph = t.red(t.cross)
+                lbl = t.red(stage["label"].ljust(label_w))
+            else:
+                glyph = t.dim(t.ring)
+                lbl = t.dim(stage["label"].ljust(label_w))
+            detail = stage["detail"]
+            if stage["key"] == "search" and st == "running" and self._sources:
+                detail = self._format_sources()
+            if not detail and st == "pending":
+                detail = t.dim("waiting")
+            row = f" {glyph} {lbl}{detail}"
+            lines.append(box_line(row))
+
+        lines.append(t.dim(bl + h * (width - 2) + br))
+        return lines
+
+    def _draw(self) -> None:
+        with self._lock:
+            self._frame += 1
+            lines = self.render_lines()
+            buf = ""
+            if self._last_lines > 0:
+                buf += f"\x1b[{self._last_lines}A\r\x1b[J"
+            buf += "\n".join(lines) + "\n"
+            self._last_lines = len(lines)
+        self.stream.write(buf)
+        self.stream.flush()
+
+    def _loop(self) -> None:
+        self._draw()
+        while not self._stop.wait(0.12):
+            self._draw()
+
+    def __enter__(self) -> "LivePanel":
+        if not self.enabled:
+            return self
+        self._started = time.monotonic()
+        self.stream.write("\x1b[?25l")
+        self.stream.flush()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        if not self.enabled:
+            return
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.5)
+        with self._lock:
+            if self.clear_on_exit and self._last_lines > 0:
+                self.stream.write(f"\x1b[{self._last_lines}A\r\x1b[J")
+                self._last_lines = 0
+            self.stream.write("\x1b[?25h")
+            self.stream.flush()
+
+
+def live_panel(
+    title: str,
+    subtitle: str = "",
+    stages: list[tuple[str, str]] | None = None,
+    *,
+    stream: TextIO | None = None,
+) -> LivePanel:
+    return LivePanel(title, subtitle, stages, stream=stream)
+
+
 @dataclass(frozen=True)
 class Theme:
     enabled: bool = False
@@ -170,6 +481,34 @@ class Theme:
     @property
     def cross(self) -> str:
         return "✗" if self.unicode else "x"
+
+    @property
+    def sep(self) -> str:
+        return "·" if self.unicode else "|"
+
+    @property
+    def ge(self) -> str:
+        return "≥" if self.unicode else ">="
+
+    @property
+    def dash(self) -> str:
+        return "—" if self.unicode else "-"
+
+    @property
+    def ellipsis(self) -> str:
+        return "…" if self.unicode else "..."
+
+    @property
+    def times(self) -> str:
+        return "×" if self.unicode else "x"
+
+    def bar(self, fraction: float, width: int = 8) -> str:
+        clamped = max(0.0, min(1.0, fraction))
+        filled = round(clamped * width)
+        empty = max(0, width - filled)
+        if self.unicode:
+            return self.green("█" * filled) + self.dim("░" * empty)
+        return self.green("#" * filled) + self.dim("-" * empty)
 
 
 def truncate(text: str, width: int) -> str:

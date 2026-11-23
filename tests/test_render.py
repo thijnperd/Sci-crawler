@@ -193,6 +193,12 @@ class ColourModeTests(unittest.TestCase):
         self.assertTrue(all(ui.visible_len(line) <= 24 for line in lines))
         self.assertGreater(len(lines), 1)
 
+    def test_ascii_fallback_contains_no_hardcoded_unicode_glyphs(self):
+        with patch("papersplease.ui.unicode_enabled", return_value=False):
+            text = render_text(report(), width=96, color=False)
+            for glyph in ("·", "≥", "—", "…", "×", "●", "◐", "○", "─"):
+                self.assertNotIn(glyph, text)
+
 
 class ProgressTests(unittest.TestCase):
     def test_progress_is_silent_off_terminal(self):

@@ -41,6 +41,15 @@ class FacetTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_intent("   ")
 
+    def test_younger_adults_is_parsed_as_young_adults_and_head_is_hypertrophy(self):
+        spec = parse_intent("optimal training for hypertrophy in younger adults since 2015")
+        names = {f.name for f in spec.facets}
+        self.assertEqual(names, {"young adults", "exercise", "hypertrophy"})
+        self.assertNotIn("younger", names)
+        self.assertEqual(spec.year_from, 2015)
+        self.assertIsNotNone(spec.head)
+        self.assertEqual(spec.head.name, "hypertrophy")
+
 
 class DateTests(unittest.TestCase):
     def test_since(self):

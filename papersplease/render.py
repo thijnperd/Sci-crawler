@@ -30,17 +30,17 @@ def _theme(color: bool | None) -> ui.Theme:
 
 def _header(subtitle: str, theme: ui.Theme, width: int) -> list[str]:
     return [
-        theme.paint("PapersPlease", "bold", "cyan") + theme.dim(f"  ·  {subtitle}"),
+        theme.paint("PapersPlease", "bold", "cyan") + theme.dim(f"  {theme.sep}  {subtitle}"),
         ui.rule(width, theme),
     ]
 
 
-def _meta_lines(paper: Paper, width: int, *, indent: str = "") -> list[str]:
+def _meta_lines(paper: Paper, width: int, *, indent: str = "", sep: str = "·") -> list[str]:
     """Authors/year/citations, then the venue, each on its own wrapped line."""
     bits = [paper.author_line(limit=2), str(paper.year or "n.d.")]
     if paper.cited_by:
         bits.append(f"cited {paper.cited_by}")
-    lines = ui.wrap(" · ".join(bits), width, initial=indent, subsequent=indent)
+    lines = ui.wrap(f" {sep} ".join(bits), width, initial=indent, subsequent=indent)
     if paper.journal:
         lines.extend(ui.wrap(paper.journal, width, initial=indent, subsequent=indent))
     return lines
@@ -75,7 +75,7 @@ def _finding_block(index: int, finding: Finding, theme: ui.Theme, width: int) ->
     number = theme.dim(f"{index:>2}.")
     title = ui.truncate(paper.title, max(20, width - 4))
     out.append(f"{number} {theme.bold(title)}")
-    out.extend(_meta_lines(paper, width, indent="    "))
+    out.extend(_meta_lines(paper, width, indent="    ", sep=theme.sep))
     if paper.doi:
         out.append(f"    {theme.dim('doi')} {paper.doi}")
     elif paper.arxiv_id:
@@ -87,10 +87,10 @@ def _finding_block(index: int, finding: Finding, theme: ui.Theme, width: int) ->
         "in_scope": theme.dot,
         "adjacent": theme.half,
         "out_of_scope": theme.ring,
-    }.get(verdict.bucket, "·")
+    }.get(verdict.bucket, theme.sep)
     scope = f"{marker} {verdict.score:.2f}  coverage {verdict.coverage:.2f}"
     if verdict.matched:
-        scope += "  ·  matched " + ", ".join(verdict.matched)
+        scope += f"  {theme.sep}  matched " + ", ".join(verdict.matched)
     out.extend(ui.wrap(scope, width, initial="    ", subsequent="      "))
     reason = verdict.excluded_reason or verdict.reason
     if reason:
@@ -100,13 +100,13 @@ def _finding_block(index: int, finding: Finding, theme: ui.Theme, width: int) ->
     return out
 
 
-def _result_line(report: Report) -> str:
+def _result_line(report: Report, sep: str = "·") -> str:
     total = report.in_scope_total if report.in_scope_total is not None else len(report.in_scope)
     shown = f" (showing {len(report.in_scope)})" if total > len(report.in_scope) else ""
     candidate_word = "candidate" if report.candidates == 1 else "candidates"
     return (
-        f"{total} in scope{shown}  ·  {len(report.adjacent)} adjacent  ·  "
-        f"{len(report.out_of_scope)} rejected  ·  from {report.candidates} {candidate_word}"
+        f"{total} in scope{shown}  {sep}  {len(report.adjacent)} adjacent  {sep}  "
+        f"{len(report.out_of_scope)} rejected  {sep}  from {report.candidates} {candidate_word}"
     )
 
 
@@ -128,14 +128,14 @@ def render_text(
     out.extend(ui.kv("Intent", f'"{spec.intent}"', theme, label_width=9, width=width))
     facets = " + ".join(f.name for f in spec.facets) or "(none)"
     out.extend(ui.kv("Scope", facets, theme, label_width=9, width=width))
-    limits = [f"coverage ≥ {spec.min_scope:.2f}"]
+    limits = [f"coverage {theme.ge} {spec.min_scope:.2f}"]
     if spec.year_from or spec.year_to:
         limits.append(f"years {spec.year_from or 'any'}-{spec.year_to or 'any'}")
     if spec.exclude:
         limits.append("excluding " + ", ".join(spec.exclude))
     if spec.anchors:
         limits.append("anchors " + ", ".join(spec.anchors))
-    out.extend(ui.kv("Limits", "  ·  ".join(limits), theme, label_width=9, width=width))
+    out.extend(ui.kv("Limits", f"  {theme.sep}  ".join(limits), theme, label_width=9, width=width))
     if origin is not None:
         out.extend(ui.kv("Input", origin, theme, label_width=9, width=width))
     else:
@@ -143,7 +143,7 @@ def render_text(
             f"{name} {count}" for name, count in sorted(report.source_counts.items())
         )
         out.extend(ui.kv("Search", counts or "no sources answered", theme, label_width=9, width=width))
-    out.extend(ui.kv("Result", _result_line(report), theme, label_width=9, width=width))
+    out.extend(ui.kv("Result", _result_line(report, sep=theme.sep), theme, label_width=9, width=width))
 
     if report.warnings:
         out.append("")
@@ -217,7 +217,7 @@ def render_explain(payload: dict[str, Any], *, width: int | None = None, color: 
     out.extend(ui.kv("Search", payload.get("search_text") or "(same as intent)", theme, label_width=9, width=width))
     out.extend(ui.kv("Query", payload.get("query") or "(none)", theme, label_width=9, width=width))
 
-    limits = [f"coverage ≥ {payload['min_scope']:.2f}"]
+    limits = [f"coverage {theme.ge} {payload['min_scope']:.2f}"]
     years = payload.get("years") or {}
     if years.get("from") or years.get("to"):
         limits.append(f"years {years.get('from') or 'any'}-{years.get('to') or 'any'}")
@@ -225,7 +225,7 @@ def render_explain(payload: dict[str, Any], *, width: int | None = None, color: 
     if payload.get("anchors"):
         guard += "; anchors " + ", ".join(payload["anchors"])
     limits.append(guard)
-    out.extend(ui.kv("Guard", "  ·  ".join(limits), theme, label_width=9, width=width))
+    out.extend(ui.kv("Guard", f"  {theme.sep}  ".join(limits), theme, label_width=9, width=width))
     out.append("")
 
     facets = payload.get("facets") or []
@@ -258,7 +258,7 @@ def render_explain(payload: dict[str, Any], *, width: int | None = None, color: 
         for term in payload["exclude"]:
             variants = catches.get(term) or []
             suffix = "  (catches " + ", ".join(variants[:6]) + ")" if variants else ""
-            out.extend(ui.wrap(term + suffix, width, initial="× ", subsequent="  "))
+            out.extend(ui.wrap(term + suffix, width, initial=f"{theme.times} ", subsequent="  "))
     else:
         out.extend(ui.kv("Excluded", "(none)", theme, label_width=9, width=width))
 
@@ -270,7 +270,7 @@ def render_explain(payload: dict[str, Any], *, width: int | None = None, color: 
     if payload.get("notes") or payload.get("issues"):
         out.append("")
     for note in payload.get("notes") or []:
-        out.extend(ui.wrap(note, width, initial="· ", subsequent="  "))
+        out.extend(ui.wrap(note, width, initial=f"{theme.sep} ", subsequent="  "))
     for issue in payload.get("issues") or []:
         out.extend(ui.wrap(issue, width, initial=f"{theme.yellow('!')} ", subsequent="  "))
     return "\n".join(out).rstrip() + "\n"
@@ -286,7 +286,7 @@ def render_providers(rows: Sequence[dict[str, Any]], *, width: int | None = None
     for row in rows:
         state_text = "on" if row["default"] else "off"
         state_text = ui.state(state_text, state_text, theme)
-        key = row.get("key_env") or "—"
+        key = row.get("key_env") or theme.dash
         if row.get("key_env") and not row.get("configured"):
             key = theme.yellow(key + " !")
         pad = " " * max(1, 5 - ui.visible_len(state_text))
@@ -309,7 +309,7 @@ def render_mirrors(statuses: Sequence, *, width: int | None = None, color: bool 
     out.append(theme.dim(f"{'MIRROR':28}  {'STATE':12}  {'LATENCY':>8}  NOTE"))
     out.append(ui.rule(width, theme))
     for status in statuses:
-        latency = f"{status.latency_ms} ms" if status.latency_ms else "—"
+        latency = f"{status.latency_ms} ms" if status.latency_ms else theme.dash
         state_text = ui.state(status.state, status.state, theme)
         pad = " " * max(1, 12 - ui.visible_len(state_text))
         note_width = max(12, width - 28 - 12 - 8 - 8)
@@ -343,7 +343,7 @@ def render_read(
     width = width or ui.terminal_width()
     out = _header("paper", theme, width)
     out.extend(theme.bold(line) for line in ui.wrap(paper.title, width, initial="", subsequent=""))
-    out.extend(theme.dim(line) for line in _meta_lines(paper, width))
+    out.extend(theme.dim(line) for line in _meta_lines(paper, width, sep=theme.sep))
     if paper.doi:
         out.append(f"{theme.dim('DOI')} {paper.doi}")
     elif paper.arxiv_id:
@@ -360,7 +360,7 @@ def render_read(
     if abstract:
         shown = abstract[:chars]
         if len(abstract) > chars:
-            shown = shown.rstrip() + " …"
+            shown = shown.rstrip() + f" {theme.ellipsis}"
         out.extend(ui.wrap(shown, width))
     else:
         out.append(theme.dim("(no abstract available)"))
@@ -392,7 +392,7 @@ def render_downloads(results: Sequence[dict[str, Any]], *, width: int | None = N
             out.extend(ui.wrap(str(item.get("note") or "no downloadable source"), width,
                                initial="    ", subsequent="    "))
         out.append("")
-    out.append(theme.dim(f"{saved} saved · {len(results) - saved} failed"))
+    out.append(theme.dim(f"{saved} saved {theme.sep} {len(results) - saved} failed"))
     return "\n".join(out).rstrip() + "\n"
 
 

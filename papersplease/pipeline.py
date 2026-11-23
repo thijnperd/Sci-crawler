@@ -18,6 +18,16 @@ from .intent import exclusion_terms, parse_intent
 from .models import Paper, ScopeSpec, Verdict, title_key
 
 Searcher = Callable[..., sources.SourceResult]
+ProgressCallback = Callable[[str, dict[str, Any]], None]
+
+
+def _emit(on_progress: ProgressCallback | None, stage: str, **data: Any) -> None:
+    if on_progress is None:
+        return
+    try:
+        on_progress(stage, data)
+    except Exception:  # never let a UI callback break the pipeline
+        pass
 
 
 @dataclass
@@ -246,6 +256,7 @@ def _search_all(
     source_names: Sequence[str],
     searchers: dict[str, Searcher],
     mode: str,
+    on_progress: ProgressCallback | None = None,
 ) -> tuple[list[Paper], dict[str, int], list[str]]:
     papers: list[Paper] = []
     counts: dict[str, int] = {}
@@ -255,6 +266,7 @@ def _search_all(
         if name not in searchers:
             warnings.append(f"unknown source '{name}' (try: {', '.join(sorted(searchers))})")
 
+    _emit(on_progress, "search_start", sources=usable, mode=mode)
     with ThreadPoolExecutor(max_workers=min(5, max(1, len(usable)))) as pool:
         futures = {
             pool.submit(searchers[name], spec, settings, limit, mode): name for name in usable
@@ -265,11 +277,20 @@ def _search_all(
                 result = future.result()
             except Exception as exc:  # a broken adapter must not kill the run
                 warnings.append(f"{name}: {type(exc).__name__}: {exc}")
+                _emit(on_progress, "source_done", source=name, count=0, ok=False, error=str(exc))
                 continue
             if result.warning:
                 warnings.append(result.warning)
             counts[name] = len(result.papers)
             papers.extend(result.papers)
+            _emit(
+                on_progress,
+                "source_done",
+                source=name,
+                count=len(result.papers),
+                ok=not bool(result.warning),
+                error=result.warning,
+            )
     return papers, counts, warnings
 
 
@@ -280,15 +301,18 @@ def run_search(
     limit: int,
     source_names: Sequence[str],
     searchers: dict[str, Searcher],
+    on_progress: ProgressCallback | None = None,
 ) -> tuple[list[Paper], dict[str, int], list[str]]:
     # Ask each source for roughly twice the requested pool: screening throws
     # papers away, and a pool of only 10 candidates is mostly reviews.
     per_source = min(80, max(15, limit * 2))
-    papers, counts, warnings = _search_all(spec, settings, per_source, source_names, searchers, "and")
+    papers, counts, warnings = _search_all(
+        spec, settings, per_source, source_names, searchers, "and", on_progress=on_progress
+    )
     if len(papers) < 5:
         # Precision-first queries can come back empty on small topics; widen.
         extra, extra_counts, extra_warnings = _search_all(
-            spec, settings, per_source, source_names, searchers, "or"
+            spec, settings, per_source, source_names, searchers, "or", on_progress=on_progress
         )
         papers.extend(extra)
         for name, count in extra_counts.items():
@@ -325,6 +349,7 @@ def find(
     expand_limit: int = 25,
     use_cache: bool | None = None,
     searchers: dict[str, Searcher] | None = None,
+    on_progress: ProgressCallback | None = None,
 ) -> Report:
     """Run the full pipeline for one research intent."""
     settings = settings or Settings.from_env()
@@ -343,9 +368,18 @@ def find(
     if spec.year_from and spec.year_to and spec.year_from > spec.year_to:
         spec.year_from, spec.year_to = spec.year_to, spec.year_from
 
+    _emit(
+        on_progress,
+        "parse",
+        facets=[f.name for f in spec.facets],
+        year_from=spec.year_from,
+        year_to=spec.year_to,
+        head=spec.head.name if spec.head else None,
+    )
+
     names = list(source_names or settings.sources)
     papers, counts, warnings = run_search(
-        spec, settings, limit=limit, source_names=names, searchers=searchers
+        spec, settings, limit=limit, source_names=names, searchers=searchers, on_progress=on_progress
     )
     merged = merge_papers(papers)
     report = Report(spec=spec, warnings=warnings, source_counts=counts, candidates=len(merged))
@@ -360,6 +394,7 @@ def find(
         preprints_only=preprints_only,
     )
     report.candidates = len(merged)
+    _emit(on_progress, "search_done", candidates=len(merged), counts=counts)
     if len(merged) != before_filters:
         report.warnings.append(f"filters kept {len(merged)} of {before_filters} candidates")
     caches = store.Caches(settings, enabled=use_cache)
@@ -367,13 +402,24 @@ def find(
     # Read: fill in missing abstracts before judging anything.
     if merged:
         to_read = [p for p in merged if not p.abstract][: max(12, limit)]
-        for paper in to_read:
+        _emit(on_progress, "read", done=0, total=len(to_read))
+        for idx, paper in enumerate(to_read, start=1):
             try:
                 reading.read(paper, settings)
             except Exception as exc:  # pragma: no cover - defensive
                 report.warnings.append(f"read failed for {paper.doi or paper.title[:40]}: {exc}")
+            _emit(on_progress, "read", done=idx, total=len(to_read))
+    else:
+        _emit(on_progress, "read", done=0, total=0)
 
     verdicts = _screen_all(merged, spec, caches)
+    _emit(
+        on_progress,
+        "screen_done",
+        in_scope=sum(1 for v in verdicts if v.bucket == "in_scope"),
+        adjacent=sum(1 for v in verdicts if v.bucket == "adjacent"),
+        out_of_scope=sum(1 for v in verdicts if v.bucket == "out_of_scope"),
+    )
 
     # Citation-graph expansion: one hop out from the best on-target papers
     # finds newer work (citations) and foundational work (references) that no
@@ -476,10 +522,10 @@ def find(
 
     # Resolve access for what is actually being recommended.
     access_limit = len(findings) if access_limit is None else access_limit
+    access_targets = [f for f in findings if f.verdict.bucket != "out_of_scope"][:access_limit]
+    _emit(on_progress, "access", done=0, total=len(access_targets))
     resolved = 0
-    for finding in findings:
-        if finding.verdict.bucket == "out_of_scope" or resolved >= access_limit:
-            continue
+    for finding in access_targets:
         try:
             finding.access = _access(
                 finding.paper, settings, caches, probe=probe_mirrors, include_oa=include_oa
@@ -487,6 +533,7 @@ def find(
             if finding.access.notes:
                 report.warnings.extend(finding.access.notes)
             resolved += 1
+            _emit(on_progress, "access", done=resolved, total=len(access_targets))
         except Exception as exc:  # pragma: no cover - defensive
             report.warnings.append(f"access lookup failed for {finding.paper.doi}: {exc}")
 
@@ -496,6 +543,13 @@ def find(
     # De-duplicate warnings while preserving order.
     seen: set[str] = set()
     report.warnings = [w for w in report.warnings if not (w in seen or seen.add(w))]
+    _emit(
+        on_progress,
+        "done",
+        in_scope=len(report.in_scope),
+        adjacent=len(report.adjacent),
+        out_of_scope=len(report.out_of_scope),
+    )
     return report
 
 

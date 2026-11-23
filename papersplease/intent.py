@@ -111,8 +111,9 @@ _THESAURUS_GROUPS: tuple[tuple[str, ...], ...] = (
     ("intensity", "training intensity", "load intensity", "proximity to failure",
      "repetitions in reserve", "rir", "rpe"),
     ("rest", "rest interval", "rest period", "interset rest", "between-set rest"),
-    ("young adults", "young men", "young women", "college students",
-     "university students", "18-25", "18-30"),
+    ("young adults", "young adult", "younger adults", "younger adult",
+     "young men", "young women", "younger men", "younger women",
+     "college students", "university students", "18-25", "18-30"),
 )
 
 _SYNONYM_INDEX: dict[str, tuple[str, ...]] = {}
@@ -207,6 +208,13 @@ _CORE_BOUNDARY = {
 }
 
 
+_NON_PLURAL_ADJECTIVES = {
+    "younger", "older", "lower", "higher", "greater", "smaller", "larger",
+    "better", "worse", "faster", "slower", "stronger", "weaker", "heavier",
+    "lighter", "shorter", "longer", "wider", "narrower", "deeper",
+}
+
+
 def _variants(token: str) -> list[str]:
     """Cheap, predictable morphological variants (plurals, -ing, -ed)."""
     out = {token}
@@ -241,7 +249,7 @@ def _variants(token: str) -> list[str]:
             out.add(singular)
     if token.endswith("y") and len(token) > 3:
         out.add(token[:-1] + "ies")
-    if not token.endswith(("s", "y")):
+    if not token.endswith(("s", "y")) and token not in _NON_PLURAL_ADJECTIVES:
         out.add(token + "s")
     # -es is only productive after a sibilant stem ("process" -> "processes");
     # "adult" must never become "adultses".
@@ -655,7 +663,14 @@ def parse_intent(
             f"anchors: {', '.join(spec.anchors) or '(none)'}"
         )
     else:
-        spec.head = (content or core)[-1] if core else None
+        if content:
+            spec.head = content[-1]
+        else:
+            non_generic = [
+                f for f in facets
+                if f.weight >= 1.0 and f.name not in POPULATION_GROUPS
+            ]
+            spec.head = non_generic[0] if non_generic else (core[-1] if core else None)
     spec.exclude = sorted({e for e in negated if e} | {x.strip().lower() for x in exclude if x.strip()})
     if spec.year_from and spec.year_to and spec.year_from > spec.year_to:
         spec.year_from, spec.year_to = spec.year_to, spec.year_from

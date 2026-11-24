@@ -22,8 +22,10 @@ papersplease find "muscle strength in older adults since 2015"
 > distribution and command are both `papersplease`. See [SOURCES.md](SOURCES.md) for the
 > comparison, the honest gaps, and attribution.
 
-Zero runtime dependencies. Python 3.10+. CLI, Python library, and MCP server over the same
-pipeline.
+Zero runtime dependencies. Python 3.10+. CLI, interactive TUI, Python library, and MCP server
+over the same pipeline.
+
+![PapersPlease interactive in-place terminal UI](docs/screenshots/tui-browser.png)
 
 ---
 
@@ -105,6 +107,44 @@ run `papersplease` with no arguments, `papersplease tui`, or `papersplease find 
 `--out` writes plain, 96-column text. The same renderer drives `explain`, `check`, `read`,
 `providers`, `mirrors` and `download`, so the layout does not change from command to command.
 `papersplease --help` ends with runnable examples.
+
+### Screenshots
+
+**Live in-place pipeline panel** (`stderr`, clears cleanly when the report prints):
+
+![Live in-place pipeline panel](docs/screenshots/live-pipeline.png)
+
+**Offline scope contract & causal direction** (`papersplease explain`):
+
+![Offline scope contract with causal direction](docs/screenshots/explain-direction.png)
+
+**Literature scope report with domain sense disambiguation** (`papersplease find`):
+
+![Literature scope report rejecting cardiac hypertrophy false positives](docs/screenshots/find-report.png)
+
+### Interactive TUI controls
+
+Launch with `papersplease` (no arguments on a TTY), `papersplease tui [intent]`, or
+`papersplease find "..." -i`:
+
+| key | action |
+|---|---|
+| `↑`/`↓` or `j`/`k` | move selection in results (or scroll detail when focused) |
+| `←`/`→` or `h`/`l` | switch focus between Results and Detail panes |
+| `J`/`K`, `PgUp`/`PgDn`, `Home`/`End` | scroll the Detail pane from anywhere / jump top or bottom |
+| `1`/`2`/`3` or `Tab`/`Shift+Tab` | switch between In Scope, Adjacent, and Rejected buckets |
+| `s` / `Space`, `4` | star/unstar paper · toggle the ★ Shortlist tab |
+| `Enter` | toggle full-screen Detail view (shows full abstract & `--deep` excerpt) |
+| `/` | search a new intent (`↑`/`↓` in the prompt cycles search history) |
+| `\` | live filter loaded papers (text, `oa`, `doi`; empty clears) |
+| `S` | cycle sort order (`score` → `year` → `citations` → `oa`) |
+| `f` | refine scope (`min=0.6 since=2018 +req -excl` or `reset`) |
+| `e` | inspect scope contract & causal direction (offline `explain`) |
+| `o` / `c` | open best link in browser / copy DOI or URL to clipboard |
+| `d` / `r` | download PDF to `./papers` / deep-read full text |
+| `x` | export starred (or in-scope) papers (`bibtex`, `ris`, `csljson`, `md`, `json`) |
+| `p` / `m` | view search sources / probe Sci-Hub mirrors (`r` refreshes) |
+| `?` / `Esc` / `q` | help / close overlay or prompt / quit |
 
 ## Install
 
@@ -233,9 +273,10 @@ that contains several facets earns a proximity bonus:
 ```
 score = 0.72 × coverage + 0.18 × title_coverage + 0.10 × proximity
 score ×= 0.78 if the title names no facet
+score ×= 0.90 if no abstract or full-text excerpt is available
 ```
 
-Four guards turn that score into a verdict:
+Six guards turn that score into a verdict:
 
 1. **Coverage ≥ `--min-scope`** (default `0.70`) and at least two facets matched.
 2. **Head concept present.** No `strength`, no "in scope" — however much muscle the paper
@@ -248,6 +289,17 @@ Four guards turn that score into a verdict:
    measures the outcome. A paper must cover both anchors and name at least one in its
    **title**. Without this, a creatine trial that recorded "3 sets, 3 sessions per week"
    reaches 70% coverage from its methods paragraph and passes as a training paper.
+5. **Causal direction (`X -> Y`).** Intents like `"influence of bad diet on diabetes type 1"`
+   extract a directional relation (`unhealthy diet → type 1 diabetes`). Papers studying the
+   reverse direction (`diabetes → eating habits`) are rejected to `out_of_scope`;
+   descriptive-only titles without a forward causal link are demoted to `adjacent`.
+6. **Domain sense & subtype disambiguation.** Polysemous terms like `hypertrophy` paired with
+   training or exercise automatically exclude cardiac and organ hypertrophy
+   (`left ventricular hypertrophy`, `cardiac hypertrophy`, etc.) unless asked for, and
+   `type 1 diabetes` rejects titles exclusively about `type 2` or gestational diabetes.
+
+Results are ranked bucket-first (`in_scope → adjacent → rejected`), then by blended score,
+citations, and recency.
 
 | paper | coverage | head `strength`? | verdict |
 |---|---|---|---|
@@ -304,6 +356,8 @@ LLM pass is for.
 
 | command | purpose |
 |---|---|
+| `papersplease` | launch the interactive in-place TUI (on a TTY) |
+| `papersplease tui [intent]` | open the interactive in-place TUI, optionally pre-loading a search |
 | `papersplease find "intent"` | search → read → screen → rank → links |
 | `papersplease check "intent" [file]` | grade a list of DOIs/titles (`-` or stdin) |
 | `papersplease explain "intent"` | show the parse, offline |
@@ -341,6 +395,7 @@ result, so you can see exactly what was searched for.
 | `--require-in title\|abstract\|title_or_abstract` | where the `--require` terms must appear (literal, not thesaurus-expanded) |
 | `--expand citations\|references\|both` | walk one citation-graph hop from the best matches and screen the result |
 | `--expand-limit N` | candidates added by expansion (default 25) |
+| `-i`, `--interactive` | open results in the interactive in-place terminal UI |
 | `--format text\|md\|json\|bibtex\|ris\|csljson` | output format; citation formats export in-scope papers |
 | `--refresh` | ignore cached verdicts and access lookups |
 | `--json`, `--md`, `--out FILE` | machine output, Markdown report, write to a file |
@@ -410,11 +465,11 @@ Lower-level pieces are usable on their own: `papersplease.intent.parse_intent`,
 
 | source | contributes | notes |
 |---|---|---|
-| Europe PMC | abstracts, MeSH keywords, PMC full text | broadest life-science coverage, no key; it has no relevance sort, so the most-cited matches are requested |
-| Crossref | DOIs, journal metadata, citation counts | no key |
-| arXiv | preprints, PDF links | no key |
+| Europe PMC | abstracts, MeSH keywords, PMC full text | broadest life-science coverage, no key; relevance-sorted with parenthesized date-filter boolean queries |
+| Crossref | DOIs, journal metadata, citation counts | no key; missing abstracts are backfilled via batched OpenAlex lookups |
+| arXiv | preprints, PDF links | no key; per-term `all:` syntax with `submittedDate` year filtering |
 | Semantic Scholar | abstracts, citation counts, OA PDFs | slow without `PAPERSPLEASE_S2_KEY` |
-| OpenAlex | topics, abstracts, OA locations | a free key avoids the shared daily quota |
+| OpenAlex | topics, abstracts, OA locations | searches `title_and_abstract.search` and powers 40-DOI batched abstract backfill |
 
 One source failing never aborts a run: the failure becomes a `warnings` entry. Results are
 de-duplicated by DOI, then by title for records without one, merging the richest field of each
@@ -481,12 +536,15 @@ papersplease/
   reading.py     # abstracts and open-access full text
   resolver.py    # OA links, Sci-Hub mirrors, health probing, downloads
   pipeline.py    # search -> merge -> read -> screen -> rank -> resolve, plus explain_intent
-  ui.py          # ANSI theme, width, wrapping, colour gating
+  ui.py          # ANSI theme, VT console setup, LivePanel, ANSI-safe truncation
+  tui.py         # interactive in-place alternate-screen terminal UI
   render.py      # terminal and Markdown reports
   cli.py         # the `papersplease` command
   mcp_server.py  # zero-dependency MCP stdio server
-tests/           # 179 unittest cases, no network required
-docs/examples/   # refs.txt and an MCP stdio session you can run
+tests/           # 206 unittest cases, no network required
+docs/
+  examples/      # refs.txt and an MCP stdio session you can run
+  screenshots/   # terminal screenshots of 0.6.0 in action
 ```
 
 ## Tests
@@ -495,45 +553,67 @@ docs/examples/   # refs.txt and an MCP stdio session you can run
 python -m unittest discover -s tests
 ```
 
-179 tests, no network. They cover facet parsing, the negation rules above, date handling,
-specificity decisions, source payload parsing with recorded fixtures, de-duplication, mirror
-health classification, safe download, the pipeline end-to-end with fake sources, the CLI
-(including `check "intent" refs.txt`), and the MCP protocol including a real stdio round trip,
-annotations and `structuredContent`.
+206 tests, no network. They cover facet parsing, causal direction extraction, domain sense
+disambiguation, the negation rules above, date handling, specificity and bucket-first ranking,
+source query formatting and payload parsing with recorded fixtures, batched abstract enrichment,
+de-duplication, mirror health classification, safe download, the pipeline end-to-end with fake
+sources, the CLI (`find`, `check`, `explain`), the interactive TUI + `LivePanel`, and the MCP
+protocol including a real stdio round trip, annotations and `structuredContent`.
 
 ## Verified, and what is not
 
 Verified in the environment this was built in:
 
-* Live crawl: `find "muscle strength in older adults since 2015" --sources europepmc`
-  returned 14 in-scope papers (3 shown), with Sci-Hub links; `sci-hub.ru` answered, `.se` did
-  not resolve, `.st` returned 403.
+* Live crawl (`0.6.0`): `find "optimal training for hypertrophy in younger adults since 2015"`
+  returned 17 in-scope skeletal muscle hypertrophy trials across Crossref, Europe PMC, and
+  OpenAlex while rejecting 9 cardiac/myocardial/left ventricular hypertrophy papers as
+  `wrong domain sense`.
+* Live directional crawl (`0.6.0`): `find "influence of bad diet on diabetes type 1"`
+  extracted `unhealthy diet → type 1 diabetes` and rejected reversed-direction and type-2-only
+  papers.
 * Deep read: DOI `10.7717/peerj.12958` returned the Europe PMC full text (PMC8858577).
 * MCP: initialize/tools/list/tools/call over real stdio, plus the official `mcp` client, with
   the expected tool schemas, `isError` handling and protocol negotiation.
-* Packaging: fresh venv, `pip install -e .`, `papersplease --version`.
+* Packaging & tests: 206 unit tests pass offline (`python -m unittest discover -s tests`).
 
 Not verified here, and reported as a limitation rather than a pass:
 
-* **`--download` against a live publisher/PMC PDF.** This sandbox received 403/500 responses
-  from the PDF hosts that were reachable at the time; the logic (candidate ordering, `%PDF`
-  verification, refusal to write HTML as PDF) is unit-tested only.
-* **OpenAlex** answered `429` from this shared IP ("insufficient budget, resets at midnight
-  UTC"), so its adapter was exercised with fixtures, not live traffic. A key fixes it.
-* The renderer was checked in a pseudo-TTY (colour escapes present; `NO_COLOR` removes them)
-  and through a pipe (plain, aligned text), but **mirror states are machine-specific** and
-  will differ for you.
+* **`--download` against a live publisher/PMC PDF.** Live PDF hosts often return 403/bot gates
+  to scripted clients; the logic (candidate ordering, `%PDF` verification, refusal to write HTML
+  as PDF) is unit-tested only.
+* **Interactive raw-TTY keypress loop** (`tui.run()`) was verified via unit tests driving
+  `TuiApp.handle_key()` and `TuiApp.render_lines()`, not via an automated pty session.
+* **Mirror states are machine-specific** and vary per network.
 
 ## Known limits
 
-* Head-concept detection is an English noun-phrase heuristic. Exotic phrasings can pick the
-  wrong head; the parse is always printed, and `--require` overrides it.
+* Head-concept and causal-direction heuristics target English research intents; exotic phrasings
+  can fall back to `ambiguous` (check `papersplease explain` and override with `--require` /
+  `--exclude`).
 * Screening is lexical unless you enable the LLM pass. It does not understand irony, negated
   claims inside a paper, or papers that only imply the topic.
 * Full text needs an open-access copy and, for PDFs, the optional `pypdf` extra.
 * `--deep` re-screens the survivors, but it does not summarise them; that is the calling
   agent's job.
 * Mirror reachability changes often. Blocked mirrors are reported, not hidden.
+
+## Shipped in 0.5 and 0.6
+
+* **Causal direction verification (0.6.0)** — parses `X -> Y` intent relations (e.g.
+  `unhealthy diet → type 1 diabetes`), rejects reversed `Y -> X` studies (`diabetes → eating
+  habits`) as `out_of_scope`, and demotes descriptive-only titles to `adjacent`.
+* **Domain sense & subtype disambiguation (0.6.0)** — automatically excludes cardiac/organ
+  hypertrophy when searching exercise/muscle hypertrophy, and filters type-2-only diabetes hits
+  on type 1 queries.
+* **Sharper retrieval & batched abstracts (0.6.0)** — OpenAlex `title_and_abstract.search`,
+  40-DOI batched OpenAlex abstract backfill, parenthesized Europe PMC date filters without
+  hardcoded citation sort, per-term arXiv queries with `submittedDate`, and bucket-first
+  ranking (`in_scope → adjacent → rejected`).
+* **Interactive in-place TUI & live stage dashboard (0.5.0 → 0.6.0)** — alternate-screen
+  split-pane browser with framed active borders, scrollbars, scrollable detail/abstract/excerpt
+  view, starring & shortlist (`4`), live filter (`\`), sort cycle (`S`), clipboard copy (`c`),
+  search history, inspectable refine (`f`), OSC 8 hyperlinks, and automatic Windows `cmd.exe`
+  Virtual Terminal enablement.
 
 ## Shipped in 0.3 and 0.4
 
@@ -606,7 +686,7 @@ It is not better at everything, and it does not try to be:
 * **PDF→Markdown:** docling-based conversion (figures, equations, tables) is better than our
   text extraction. We did not add a heavy dependency for it.
 * **Library management:** papis and cobib own that. We export BibTeX/RIS/CSL-JSON so they can.
-* **Maturity:** those projects have years of releases; this is 0.4.0.
+* **Maturity:** those projects have years of releases; this is 0.6.0.
 
 What is better here is the part the rest of the design serves: **screening precision, reasons,
 and an MCP server with zero runtime dependencies**. On the same 71 candidates, the list-intent

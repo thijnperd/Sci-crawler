@@ -8,7 +8,6 @@ degrades the result set and adds a warning; it does not end the run.
 from __future__ import annotations
 
 import html
-import json
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -16,7 +15,7 @@ from dataclasses import dataclass, field
 
 from .config import Settings
 from .models import Paper, ScopeSpec, norm_doi
-from .net import Blocked, FetchError, fetch, fetch_json, query_url
+from .net import FetchError, fetch, fetch_json, query_url
 
 _TAG = re.compile(r"<[^>]+>")
 _WS = re.compile(r"\s+")
@@ -73,7 +72,7 @@ def search_europepmc(spec: ScopeSpec, settings: Settings, limit: int, mode: str 
         },
     )
     try:
-        data = fetch_json(url, settings, cache_ttl=3600)
+        data = fetch_json(url, settings, cache_ttl=3600, timeout=15.0, retries=1)
     except FetchError as exc:
         return SourceResult("europepmc", warning=f"Europe PMC: {exc.message}")
 
@@ -166,7 +165,7 @@ def search_crossref(spec: ScopeSpec, settings: Settings, limit: int, mode: str =
         },
     )
     try:
-        data = fetch_json(url, settings, cache_ttl=3600)
+        data = fetch_json(url, settings, cache_ttl=3600, timeout=15.0, retries=1)
     except FetchError as exc:
         return SourceResult("crossref", warning=f"Crossref: {exc.message}")
 
@@ -225,7 +224,7 @@ def _arxiv_query(spec: ScopeSpec, mode: str) -> str:
     joiner = " AND " if mode == "and" else " OR "
     chunks: list[str] = []
     for facet in spec.search_facets(4):
-        curated = (facet.canonical or facet.terms)[:5]
+        curated = (facet.canonical or facet.terms)[:3]
         terms = [f'all:"{w}"' if " " in w else f"all:{w}" for w in curated]
         chunks.append("(" + " OR ".join(terms) + ")")
     query = joiner.join(chunks) or f"all:({spec.clean_query_text(mode)})"
@@ -243,7 +242,7 @@ def search_arxiv(spec: ScopeSpec, settings: Settings, limit: int, mode: str = "a
         {"search_query": query, "start": 0, "max_results": limit, "sortBy": "relevance"},
     )
     try:
-        body = fetch(url, settings, cache_ttl=3600)
+        body = fetch(url, settings, cache_ttl=3600, timeout=10.0, retries=0)
         root = ET.fromstring(body)
     except FetchError as exc:
         return SourceResult("arxiv", warning=f"arXiv: {exc.message}")
@@ -288,10 +287,10 @@ def _text(node: ET.Element, path: str) -> str | None:
     return found.text.strip() if found is not None and found.text else None
 
 
-_ARXIV_URL = re.compile(r"arxiv\.org/(?:abs|pdf|html)/([^?#\s]+)", re.I)
+_ARXIV_URL = re.compile(r"arxiv\.org/(?:abs|pdf|html)/([^?#\s]+)", re.IGNORECASE)
 _ARXIV_ID = re.compile(
     r"^(?:\d{4}\.\d{4,5}(?:v\d+)?|[a-z][a-z-]*(?:\.[A-Z]{2})?/\d{7}(?:v\d+)?)$",
-    re.I,
+    re.IGNORECASE,
 )
 
 
@@ -303,7 +302,7 @@ def arxiv_id(value: str | None) -> str | None:
     match = _ARXIV_URL.search(text)
     if match:
         text = match.group(1)
-    text = re.sub(r"^arxiv:\s*", "", text, flags=re.I).strip().rstrip("/")
+    text = re.sub(r"^arxiv:\s*", "", text, flags=re.IGNORECASE).strip().rstrip("/")
     if text.lower().endswith(".pdf"):
         text = text[:-4]
     return text if _ARXIV_ID.match(text) else None
@@ -343,7 +342,14 @@ def search_semanticscholar(spec: ScopeSpec, settings: Settings, limit: int, mode
     url = query_url("https://api.semanticscholar.org/graph/v1/paper/search", params)
     headers = {"x-api-key": settings.s2_key} if settings.s2_key else None
     try:
-        data = fetch_json(url, settings, cache_ttl=3600, headers=headers)
+        data = fetch_json(
+            url,
+            settings,
+            cache_ttl=3600,
+            headers=headers,
+            timeout=10.0,
+            retries=1 if settings.s2_key else 0,
+        )
     except FetchError as exc:
         return SourceResult("semanticscholar", warning=f"Semantic Scholar: {exc.message}")
 
@@ -408,7 +414,7 @@ def search_openalex(spec: ScopeSpec, settings: Settings, limit: int, mode: str =
     }
     url = query_url("https://api.openalex.org/works", params)
     try:
-        data = fetch_json(url, settings, cache_ttl=3600)
+        data = fetch_json(url, settings, cache_ttl=3600, timeout=15.0, retries=1)
     except FetchError as exc:
         note = _RATE_NOTE if exc.status in (429, 403) else exc.message
         return SourceResult("openalex", warning=f"OpenAlex: {note}")
@@ -671,10 +677,86 @@ def fetch_by_doi(doi: str, settings: Settings, *, deep_meta: bool = True) -> Pap
     return paper
 
 
+_EMBEDDED_DOI = re.compile(r"(10\.\d{4,9}/[^\s\"'<>?#&]+)", re.IGNORECASE)
+_PUBMED_URL = re.compile(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)", re.IGNORECASE)
+_PMC_URL = re.compile(r"(?:pmc\.ncbi\.nlm\.nih\.gov|ncbi\.nlm\.nih\.gov/pmc)/articles/(PMC\d+)", re.IGNORECASE)
+_NATURE_URL = re.compile(r"nature\.com/articles/([a-z0-9-]+)", re.IGNORECASE)
+_META_TAG = re.compile(r"<meta\s+[^>]*>", re.IGNORECASE)
+_META_NAME = re.compile(r"""name\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
+_META_CONTENT = re.compile(r"""content\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
+
+
+def _fetch_epmc_query(query: str, settings: Settings) -> Paper | None:
+    url = query_url(
+        "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+        {"query": query, "format": "json", "pageSize": 1, "resultType": "core"},
+    )
+    try:
+        items = (
+            fetch_json(url, settings, cache_ttl=86400, timeout=10.0, retries=1)
+            .get("resultList", {})
+            .get("result", [])
+        )
+        if items:
+            return _epmc_paper(items[0])
+    except (FetchError, KeyError, TypeError):
+        return None
+    return None
+
+
+def _extract_meta_doi(page_html: str) -> str | None:
+    for tag in _META_TAG.findall(page_html[:65536]):
+        name_match = _META_NAME.search(tag)
+        if not name_match:
+            continue
+        if name_match.group(1).strip().lower() not in {"citation_doi", "dc.identifier", "prism.doi"}:
+            continue
+        content_match = _META_CONTENT.search(tag)
+        if not content_match:
+            continue
+        doi = norm_doi(content_match.group(1))
+        if doi:
+            return doi
+    return None
+
+
+def _resolve_url(url_text: str, settings: Settings, *, deep_meta: bool = False) -> Paper | None:
+    """Resolve publisher, PubMed, PMC, or Nature URLs to a Paper without falling back to title search."""
+    cleaned = url_text.strip()
+    embedded = _EMBEDDED_DOI.search(urllib.parse.unquote(cleaned))
+    if embedded:
+        doi = norm_doi(embedded.group(1).rstrip(".,;)"))
+        if doi:
+            return fetch_by_doi(doi, settings, deep_meta=deep_meta)
+
+    pmc_match = _PMC_URL.search(cleaned)
+    if pmc_match:
+        return _fetch_epmc_query(f"PMCID:{pmc_match.group(1).upper()}", settings)
+
+    pubmed_match = _PUBMED_URL.search(cleaned)
+    if pubmed_match:
+        return _fetch_epmc_query(f"EXT_ID:{pubmed_match.group(1)}", settings)
+
+    nature_match = _NATURE_URL.search(cleaned)
+    if nature_match:
+        paper = fetch_by_doi(f"10.1038/{nature_match.group(1)}", settings, deep_meta=deep_meta)
+        if paper is not None:
+            return paper
+
+    try:
+        raw = fetch(cleaned, settings, cache_ttl=3600, timeout=8.0, retries=0, accept="text/html")
+    except FetchError:
+        return None
+    meta_doi = _extract_meta_doi(raw.decode("utf-8", "replace"))
+    if meta_doi:
+        return fetch_by_doi(meta_doi, settings, deep_meta=deep_meta)
+    return None
+
+
 def resolve_identifier(
     value: str, settings: Settings, *, deep_meta: bool = False
 ) -> Paper | None:
-    """Resolve anything a user may paste: DOI, DOI/arXiv URL, arXiv id or title."""
+    """Resolve anything a user may paste: DOI, URL (DOI/arXiv/PubMed/PMC/publisher), arXiv id or title."""
     text = (value or "").strip()
     if not text:
         return None
@@ -684,6 +766,8 @@ def resolve_identifier(
     ident = arxiv_id(text)
     if ident:
         return fetch_by_arxiv(ident, settings)
+    if text.lower().startswith(("http://", "https://")):
+        return _resolve_url(text, settings, deep_meta=deep_meta)
     return find_by_title(text, settings)
 
 

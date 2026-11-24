@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "papersplease"
-version = "0.6.0"
+version = "0.7.0"
 description = "An agent-native literature crawler: searches, reads, screens each paper for scope, then hands back Sci-Hub links."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,9 +23,14 @@ dependencies = []
 [project.optional-dependencies]
 # Only needed for `--deep` full-text PDF reading.
 pdf = ["pypdf>=4.0"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [project.scripts]
 papersplease = "papersplease.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["papersplease*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"

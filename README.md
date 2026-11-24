@@ -541,7 +541,7 @@ papersplease/
   render.py      # terminal and Markdown reports
   cli.py         # the `papersplease` command
   mcp_server.py  # zero-dependency MCP stdio server
-tests/           # 206 unittest cases, no network required
+tests/           # 224 unittest/integration cases, no network required
 docs/
   examples/      # refs.txt and an MCP stdio session you can run
   screenshots/   # terminal screenshots of 0.6.0 in action
@@ -550,31 +550,38 @@ docs/
 ## Tests
 
 ```bash
+pip install -e ".[dev]"
+python -m ruff check papersplease tests
+python -m pytest -q
+# or with stdlib only:
 python -m unittest discover -s tests
 ```
 
-206 tests, no network. They cover facet parsing, causal direction extraction, domain sense
+224 tests, no network. They cover facet parsing, causal direction extraction, domain sense
 disambiguation, the negation rules above, date handling, specificity and bucket-first ranking,
 source query formatting and payload parsing with recorded fixtures, batched abstract enrichment,
-de-duplication, mirror health classification, safe download, the pipeline end-to-end with fake
-sources, the CLI (`find`, `check`, `explain`), the interactive TUI + `LivePanel`, and the MCP
-protocol including a real stdio round trip, annotations and `structuredContent`.
+de-duplication across multiple DOIs sharing a title, preprint vs. journal merge precedence,
+word-boundary author/venue filters, URL resolution (embedded DOI, PubMed, PMC, publisher meta),
+mirror health classification, safe download, binary HTTP caching, real `cp1252` stdio CLI/MCP
+pipes and malformed JSON-RPC recovery, the pipeline end-to-end with fake sources, the interactive
+TUI + `LivePanel` glyph fallback & narrow keybar wrapping, and the full MCP protocol.
 
 ## Verified, and what is not
 
 Verified in the environment this was built in:
 
-* Live crawl (`0.6.0`): `find "optimal training for hypertrophy in younger adults since 2015"`
-  returned 17 in-scope skeletal muscle hypertrophy trials across Crossref, Europe PMC, and
-  OpenAlex while rejecting 9 cardiac/myocardial/left ventricular hypertrophy papers as
-  `wrong domain sense`.
+* Live crawl (`0.7.0`, cold cache, `--limit 5 --no-mirror-probe --refresh`):
+  `find "optimal training for hypertrophy in younger adults since 2015"` completed in
+  34.86 s (down from 92.9 s) and returned 17 in-scope trials on Windows.
 * Live directional crawl (`0.6.0`): `find "influence of bad diet on diabetes type 1"`
   extracted `unhealthy diet → type 1 diabetes` and rejected reversed-direction and type-2-only
   papers.
 * Deep read: DOI `10.7717/peerj.12958` returned the Europe PMC full text (PMC8858577).
-* MCP: initialize/tools/list/tools/call over real stdio, plus the official `mcp` client, with
-  the expected tool schemas, `isError` handling and protocol negotiation.
-* Packaging & tests: 206 unit tests pass offline (`python -m unittest discover -s tests`).
+* MCP & Windows pipes (`0.7.0`): verified real subprocess `cp1252` stdio CLI/MCP UTF-8
+  piping, redirected `papersplease explain ... > file.txt`, JSON-RPC recovery on
+  `"params": [1]` and empty batches, plus official `mcp` client round-trips.
+* Packaging & tests: `ruff` (`All checks passed!`) and all 224 unit/integration tests pass
+  offline (`pytest` and `unittest`).
 
 Not verified here, and reported as a limitation rather than a pass:
 
@@ -596,6 +603,14 @@ Not verified here, and reported as a limitation rather than a pass:
 * `--deep` re-screens the survivors, but it does not summarise them; that is the calling
   agent's job.
 * Mirror reachability changes often. Blocked mirrors are reported, not hidden.
+
+## Shipped in 0.7
+
+* **Windows stdio UTF-8 & MCP hardening** — CLI and MCP servers reconfigure `stdin`/`stdout`/`stderr` to UTF-8 so piped runs (`papersplease find ... > out.txt`) and `cp1252` MCP stdio hosts never crash with `UnicodeEncodeError`/`UnicodeDecodeError`; malformed JSON-RPC frames (`"params": [1]`, bad methods, empty batches) return clean JSON-RPC errors instead of exiting the server.
+* **Binary HTTP cache & multi-DOI dedup** — HTTP cache stores raw bodies in base64 (`body_b64`) with thread/PID-safe writes so cached PDFs round-trip losslessly; title deduplication retains all distinct DOIs sharing a title while preferring published journal years/types over preprints on merge.
+* **Faster retrieval & bounded access** — remaining abstract lookups and access resolution run in parallel threads with tightened adapter timeouts/retries, bounded default access targets (shown in-scope papers + up to 6 adjacent candidates), cached regex compilation, full Unicode dash normalization (`‐`–`—`/`−`), and flag-keyed access caches (`include_oa`, `probe`, `mirrors`).
+* **Word-boundary filters, URL resolution, & CLI guards** — `--author`/`--venue` match on word boundaries (`--author Li` rejects `Lindqvist`), `resolve_identifier` resolves embedded-DOI, PubMed, PMC, Nature, and `<meta name="citation_doi">` publisher URLs without Crossref title fallback, `check` honors `--min-scope 0` and filter specs, and invalid numeric flags fail loudly.
+* **Windows font-safe glyphs, narrow keybar, & CI** — gates legacy console/missing Windows glyphs (`✗`→`×`, `★`→`*`, `↗`→`→`, `◐`/`✓`/Braille behind terminal detection, plus `PAPERSPLEASE_ASCII`), deduplicates duplicate `LivePanel` chrome inside the TUI, wraps narrow keybars keeping `? help` and `q quit` pinned, and adds `.[dev]` extras + GitHub Actions CI across Ubuntu and Windows.
 
 ## Shipped in 0.5 and 0.6
 
@@ -686,7 +701,7 @@ It is not better at everything, and it does not try to be:
 * **PDF→Markdown:** docling-based conversion (figures, equations, tables) is better than our
   text extraction. We did not add a heavy dependency for it.
 * **Library management:** papis and cobib own that. We export BibTeX/RIS/CSL-JSON so they can.
-* **Maturity:** those projects have years of releases; this is 0.6.0.
+* **Maturity:** those projects have years of releases; this is 0.7.0.
 
 What is better here is the part the rest of the design serves: **screening precision, reasons,
 and an MCP server with zero runtime dependencies**. On the same 71 candidates, the list-intent

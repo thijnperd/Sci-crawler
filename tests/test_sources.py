@@ -9,7 +9,6 @@ from papersplease.config import Settings
 from papersplease.intent import parse_intent
 from papersplease.models import Paper
 
-
 SETTINGS = Settings(cache=False, mailto="test@example.org", unpaywall_email="test@example.org")
 
 
@@ -183,7 +182,6 @@ class OpenAlexTests(unittest.TestCase):
         self.assertIsNone(sources.reconstruct_abstract(None))
 
     def test_rate_limit_message_is_actionable(self):
-        inverted = None
         from papersplease.net import FetchError
 
         with patch.object(sources, "fetch_json", side_effect=FetchError("u", 429, "Rate limit")):
@@ -273,6 +271,41 @@ class QueryAndReadingTests(unittest.TestCase):
         text = reading._strip_xml(xml)
         self.assertIn("muscle hypertrophy increased", text)
         self.assertNotIn("Junk citation", text)
+
+
+class UrlResolutionTests(unittest.TestCase):
+    def test_resolve_identifier_handles_embedded_doi_pubmed_pmc_and_meta(self):
+        sample = Paper(title="Resolved Paper", doi="10.1007/s40279-020-01362-0")
+        with patch.object(sources, "fetch_by_doi", return_value=sample) as mock_doi:
+            got = sources.resolve_identifier(
+                "https://link.springer.com/article/10.1007/s40279-020-01362-0", SETTINGS
+            )
+            self.assertEqual(got.doi, sample.doi)
+            mock_doi.assert_called_once_with("10.1007/s40279-020-01362-0", SETTINGS, deep_meta=False)
+
+        with patch.object(sources, "_fetch_epmc_query", return_value=sample) as mock_epmc:
+            sources.resolve_identifier("https://pubmed.ncbi.nlm.nih.gov/34567890/", SETTINGS)
+            mock_epmc.assert_called_with("EXT_ID:34567890", SETTINGS)
+            sources.resolve_identifier("https://pmc.ncbi.nlm.nih.gov/articles/PMC1234567/", SETTINGS)
+            mock_epmc.assert_called_with("PMCID:PMC1234567", SETTINGS)
+
+        html_doc = b'<html><head><meta name="citation_doi" content="10.1234/meta.1"></head></html>'
+        with (
+            patch.object(sources, "fetch", return_value=html_doc),
+            patch.object(sources, "fetch_by_doi", return_value=sample) as mock_meta_doi,
+            patch.object(sources, "find_by_title") as mock_title,
+        ):
+            got = sources.resolve_identifier("https://publisher.example/article/xyz", SETTINGS)
+            self.assertIsNotNone(got)
+            mock_meta_doi.assert_called_once_with("10.1234/meta.1", SETTINGS, deep_meta=False)
+            mock_title.assert_not_called()
+
+        with (
+            patch.object(sources, "fetch", return_value=b"<html><body>No DOI</body></html>"),
+            patch.object(sources, "find_by_title") as mock_title,
+        ):
+            self.assertIsNone(sources.resolve_identifier("https://publisher.example/none", SETTINGS))
+            mock_title.assert_not_called()
 
 
 if __name__ == "__main__":

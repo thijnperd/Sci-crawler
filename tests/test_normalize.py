@@ -5,7 +5,6 @@ import unittest
 from papersplease.intent import parse_intent
 from papersplease.normalize import normalize_intent
 
-
 DUTCH = (
     "optimale rep en set count en uren en schema en oefeningen in de gym "
     "voor man 18 jaar oud voor spiergroei"
@@ -83,8 +82,8 @@ class DutchIntentParsingTests(unittest.TestCase):
         self.assertNotIn("spiergroei", query)
 
     def test_explain_payload_carries_the_translation(self):
-        from papersplease.pipeline import explain_intent
         from papersplease.config import Settings
+        from papersplease.pipeline import explain_intent
 
         payload = explain_intent(DUTCH, settings=Settings(cache=False))
         self.assertTrue(payload["facets"])

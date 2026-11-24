@@ -250,5 +250,64 @@ class AdvancedTuiTests(unittest.TestCase):
         self.assertTrue(ui._ANSI.sub("", cut).endswith("..."))
 
 
+class RegressionUxTests(unittest.TestCase):
+    def test_check_respects_zero_min_scope_and_filters(self):
+        buf = io.StringIO()
+        stdin = io.StringIO("Muscle hypertrophy in older adults\n")
+        with patch("sys.stdin", stdin), patch("sys.stdout", buf):
+            rc = cli.main(
+                [
+                    "check",
+                    "muscle hypertrophy",
+                    "--min-scope",
+                    "0",
+                    "--require",
+                    "volume",
+                    "--exclude",
+                    "rodents",
+                    "-",
+                ]
+            )
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("0.00", out)
+        self.assertIn("volume", out.lower())
+        self.assertIn("rodents", out.lower())
+
+    def test_user_agent_matches_package_version(self):
+        import os
+
+        import papersplease
+        from papersplease.config import Settings
+
+        env = {k: v for k, v in os.environ.items() if k != "PAPERSPLEASE_USER_AGENT"}
+        with patch.dict(os.environ, env, clear=True):
+            cfg = Settings.from_env()
+        self.assertIn(f"papersplease/{papersplease.__version__}", cfg.user_agent)
+
+    def test_live_panel_hide_brand_and_safe_glyph_gating(self):
+        panel = ui.LivePanel("live pipeline", '"hypertrophy"', stream=io.StringIO(), show_brand=False)
+        panel.theme = ui.Theme(enabled=False, unicode=True, rich_unicode=False)
+        joined = "\n".join(panel.render_lines(width=72))
+        self.assertNotIn("PapersPlease", joined)
+        self.assertEqual(panel.theme.half, "~")
+        self.assertEqual(panel.theme.check, "ok")
+        self.assertEqual(panel.theme.cross, "×")
+        self.assertEqual(panel.theme.star, "*")
+        self.assertEqual(panel.theme.arrow, "→")
+        for forbidden in ("✗", "★", "↗", "◐", "✓"):
+            self.assertNotIn(forbidden, joined)
+
+    def test_narrow_keybar_wraps_and_pins_help_and_quit(self):
+        app = TuiApp(report=_sample_report(), stream=io.StringIO())
+        lines = app.render_lines(56, 20)
+        self.assertEqual(len(lines), 20)
+        for line in lines:
+            self.assertLessEqual(ui.visible_len(line), 56)
+        bottom = "\n".join(lines[-2:])
+        self.assertIn("? help", bottom)
+        self.assertIn("q quit", bottom)
+
+
 if __name__ == "__main__":
     unittest.main()

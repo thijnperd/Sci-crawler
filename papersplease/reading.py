@@ -12,7 +12,7 @@ from __future__ import annotations
 import html
 import re
 import urllib.parse
-from typing import Sequence
+from collections.abc import Sequence
 
 from .config import Settings
 from .models import Paper
@@ -23,7 +23,7 @@ _WS = re.compile(r"\s+")
 _SECTION_NOISE = re.compile(
     r"<(?:ref-list|ack|fn-group)\b|<title[^>]*>\s*(?:references|acknowledg(?:e)?ments|"
     r"author contributions|competing interests|conflict of interest|supplementary material)\s*</title>",
-    re.I,
+    re.IGNORECASE,
 )
 
 
@@ -53,7 +53,11 @@ def fetch_abstract(paper: Paper, settings: Settings) -> str | None:
         {"query": query, "format": "json", "pageSize": 1, "resultType": "core"},
     )
     try:
-        items = fetch_json(url, settings, cache_ttl=86400).get("resultList", {}).get("result", [])
+        items = (
+            fetch_json(url, settings, cache_ttl=86400, timeout=8.0, retries=0)
+            .get("resultList", {})
+            .get("result", [])
+        )
     except FetchError:
         return None
     if not items:
@@ -172,7 +176,7 @@ def fetch_pdf_text(url: str, settings: Settings) -> tuple[str | None, str]:
         for page in reader.pages[:40]:
             chunks.append(page.extract_text() or "")
         text = _WS.sub(" ", " ".join(chunks)).strip()
-    except Exception as exc:  # pypdf raises many types on malformed files
+    except Exception as exc:  # noqa: BLE001 - pypdf raises many types on malformed files
         return None, f"PDF parse failed ({type(exc).__name__})"
     if len(text) < 500:
         return None, "PDF yielded little text (likely scanned)"

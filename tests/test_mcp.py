@@ -11,7 +11,6 @@ from pathlib import Path
 from papersplease.config import Settings
 from papersplease.mcp_server import PROTOCOL_VERSIONS, TOOLS, handle_message
 
-
 SETTINGS = Settings(cache=False, mirrors=["https://sci-hub.se"], mailto="", unpaywall_email="", openalex_key="", s2_key="")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -52,7 +51,7 @@ class ToolListingTests(unittest.TestCase):
         response = call("tools/list")
         tools = {tool["name"]: tool for tool in response["result"]["tools"]}
         self.assertEqual(set(tools), set(TOOLS))
-        for name, tool in tools.items():
+        for tool in tools.values():
             self.assertIn("inputSchema", tool)
             self.assertEqual(tool["inputSchema"]["type"], "object")
         self.assertIn("query", tools["search_literature"]["inputSchema"]["required"])
@@ -254,6 +253,7 @@ class StdioTransportTests(unittest.TestCase):
             text=True,
             cwd=str(REPO_ROOT),
             timeout=60,
+            check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         lines = [line for line in completed.stdout.splitlines() if line.strip()]
@@ -278,43 +278,46 @@ class CliSmokeTests(unittest.TestCase):
                 text=True,
                 cwd=str(REPO_ROOT),
                 timeout=60,
+                check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_check_accepts_a_file_after_the_intent(self):
-        handle = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
-        try:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as handle:
             handle.write("Grip strength and physical function in older adults\n")
-            handle.close()
+            name = handle.name
+        try:
             completed = subprocess.run(
-                [sys.executable, "-m", "papersplease", "check", "muscle strength in older adults", handle.name],
+                [sys.executable, "-m", "papersplease", "check", "muscle strength in older adults", name],
                 capture_output=True,
                 text=True,
                 cwd=str(REPO_ROOT),
                 timeout=60,
+                check=False,
             )
         finally:
-            os.unlink(handle.name)
+            os.unlink(name)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("in scope", completed.stdout)
 
     def test_check_can_export_bibtex(self):
-        handle = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
-        try:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as handle:
             handle.write("Grip strength in older adults\n")
-            handle.close()
+            name = handle.name
+        try:
             completed = subprocess.run(
                 [
                     sys.executable, "-m", "papersplease", "check",
-                    "muscle strength in older adults", handle.name, "--format", "bibtex",
+                    "muscle strength in older adults", name, "--format", "bibtex",
                 ],
                 capture_output=True,
                 text=True,
                 cwd=str(REPO_ROOT),
                 timeout=60,
+                check=False,
             )
         finally:
-            os.unlink(handle.name)
+            os.unlink(name)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("@article{", completed.stdout)
 
@@ -325,6 +328,7 @@ class CliSmokeTests(unittest.TestCase):
             text=True,
             cwd=str(REPO_ROOT),
             timeout=60,
+            check=False,
         )
         self.assertIn("--min-scope", completed.stdout)
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from typing import Iterable, Sequence
+from collections.abc import Iterable, Sequence
 
 from .models import Paper
 from .pipeline import Finding

@@ -205,10 +205,10 @@ def _copy_to_clipboard(text: str, stream: TextIO, vt_ok: bool) -> bool:
                 timeout=1.5,
                 check=False,
             )
-            if proc.returncode == 0:
-                return True
-        except Exception:
-            continue
+        except (OSError, subprocess.SubprocessError):
+            proc = None
+        if proc is not None and proc.returncode == 0:
+            return True
     if vt_ok:
         encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
         stream.write(f"\x1b]52;c;{encoded}\x07")
@@ -231,10 +231,7 @@ class TuiApp:
     ):
         self.settings = settings or Settings.from_env()
         self.stream = stream or sys.stdout
-        self.theme = ui.Theme(
-            enabled=ui.color_enabled(self.stream),
-            unicode=ui.unicode_enabled(self.stream),
-        )
+        self.theme = ui.Theme.auto(self.stream)
         self.report: Report | None = report
         self.intent: str = (report.spec.intent if report else initial_intent).strip()
         self.find_kwargs: dict[str, Any] = dict(find_kwargs or {})
@@ -393,6 +390,7 @@ class TuiApp:
             f'"{intent}"',
             stream=self.stream,
             clear_on_exit=False,
+            show_brand=False,
         )
         panel.theme = self.theme
         with self._busy_lock:
@@ -420,7 +418,7 @@ class TuiApp:
                     f"{len(rep.out_of_scope)} rejected.",
                     "ok",
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - worker thread surfaces failure to status bar
                 self.set_status(f"Search failed: {exc}", "error")
             finally:
                 with self._busy_lock:
@@ -442,7 +440,7 @@ class TuiApp:
         try:
             webbrowser.open(url)
             self.set_status(f"Opened {ui.truncate(url, 60, unicode=self.theme.unicode)}", "ok")
-        except Exception as exc:
+        except (OSError, webbrowser.Error) as exc:
             self.set_status(f"Could not open browser: {exc}", "error")
 
     def _best_url(self, finding: Finding) -> str | None:
@@ -486,6 +484,7 @@ class TuiApp:
             stages=[("access", "Resolve PDF"), ("save", "Save file")],
             stream=self.stream,
             clear_on_exit=False,
+            show_brand=False,
         )
         panel.theme = self.theme
         panel.set_stage("access", "running", "checking OA and Sci-Hub")
@@ -509,7 +508,7 @@ class TuiApp:
                 else:
                     panel.set_stage("save", "error", str(outcome.get("note")))
                     self.set_status(f"Download failed: {outcome.get('note')}", "warn")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - worker thread surfaces failure to status bar
                 self.set_status(f"Download error: {exc}", "error")
             finally:
                 with self._busy_lock:
@@ -531,6 +530,7 @@ class TuiApp:
             stages=[("read", "Fetch full text")],
             stream=self.stream,
             clear_on_exit=False,
+            show_brand=False,
         )
         panel.theme = self.theme
         panel.set_stage("read", "running", target)
@@ -554,7 +554,7 @@ class TuiApp:
                     self.set_status(f"Read updated ({refreshed.read_note or 'abstract loaded'})", "ok")
                 else:
                     self.set_status("No additional text found for this paper.", "warn")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - worker thread surfaces failure to status bar
                 self.set_status(f"Read failed: {exc}", "error")
             finally:
                 with self._busy_lock:
@@ -602,9 +602,9 @@ class TuiApp:
             "",
             f"  {t.cyan('↑/↓  j/k')}        Move in list (or scroll detail when focused)",
             f"  {t.cyan('←/→  h/l')}        Switch focus between Results and Detail panes",
-            f"  {t.cyan('J/K  PgUp/PgDn')}  Scroll Detail pane anytime · Home/End jump",
+            f"  {t.cyan('J/K  PgUp/PgDn')}  Scroll Detail pane anytime {t.sep} Home/End jump",
             f"  {t.cyan('1/2/3  Tab')}      Switch In Scope / Adjacent / Rejected buckets",
-            f"  {t.cyan('s / Space  4')}    Star/unstar paper · view ★ Shortlist",
+            f"  {t.cyan('s / Space  4')}    Star/unstar paper {t.sep} view {t.star} Shortlist",
             f"  {t.cyan('Enter')}           Toggle full-screen Detail view",
             f"  {t.cyan('/')}               Search a new intent (↑/↓ in prompt for history)",
             f"  {t.cyan('f')}               Refine scope (min=0.6 since=2018 +req -excl | reset)",
@@ -646,6 +646,7 @@ class TuiApp:
             stages=[("probe", "Probe mirrors")],
             stream=self.stream,
             clear_on_exit=False,
+            show_brand=False,
         )
         panel.theme = self.theme
         panel.set_stage("probe", "running", f"{len(self.settings.mirrors)} configured mirrors")
@@ -663,7 +664,7 @@ class TuiApp:
                     self.overlay_lines = self._render_overlay_content("mirrors", cols)
                     self._last_overlay_cols = cols
                     self.overlay_scroll = 0
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - worker thread surfaces failure to status bar
                 self.set_status(f"Mirror check failed: {exc}", "error")
             finally:
                 with self._busy_lock:
@@ -1095,8 +1096,10 @@ class TuiApp:
         lines.append(_pad_visible(brand + " " * gap + right, cols, unicode=t.unicode))
         lines.append(ui.rule(cols, t))
 
-        # Reserve 2 bottom lines (status/prompt + keybind bar)
-        body_height = max(4, rows - 4)
+        # Reserve bottom lines (prompt/status + 1-or-2-line keybind bar)
+        keybar_lines = [] if self.prompt_mode is not None else self._keybar_lines(cols)
+        footer_h = 2 if self.prompt_mode is not None else 1 + len(keybar_lines)
+        body_height = max(4, rows - 2 - footer_h)
         self._last_body_height = body_height
 
         with self._busy_lock:
@@ -1126,7 +1129,7 @@ class TuiApp:
             body.append("")
         lines.extend(_pad_visible(line, cols, unicode=t.unicode) for line in body)
 
-        # 3. Bottom Prompt / Status Bar + Keybar (2 lines)
+        # 3. Bottom Prompt / Status Bar + wrapped Keybar
         if self.prompt_mode is not None:
             prompt_labels = {
                 "search": "Search intent",
@@ -1144,9 +1147,9 @@ class TuiApp:
             )
             lines.append(_pad_visible(lbl + shown_buf + cursor, cols, unicode=t.unicode))
 
-            hint_bits = [f"Enter submit", f"Esc cancel"]
+            hint_bits = ["Enter submit", "Esc cancel"]
             if self.prompt_mode == "search" and self.search_history:
-                hint_bits.append("↑↓ history")
+                hint_bits.append("↑↓ history" if t.unicode else "^v history")
             elif self.prompt_mode == "refine":
                 active = self._active_refine_summary()
                 if active:
@@ -1170,58 +1173,82 @@ class TuiApp:
                 )
             else:
                 lines.append(ui.rule(cols, t))
-            lines.append(_pad_visible(self._keybar(cols), cols, unicode=t.unicode))
+            for kline in keybar_lines:
+                lines.append(_pad_visible(kline, cols, unicode=t.unicode))
 
         return lines[:rows]
 
-    def _keybar(self, cols: int) -> str:
+    def _keybar_items(self) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
         t = self.theme
+        arr_ud = "↑↓" if t.unicode else "^v"
+        arr_lr = "←→" if t.unicode else "<>"
         if self.overlay is not None:
-            items = [("↑↓", "scroll"), ("PgUp/Dn", "page"), ("Esc/q", "close")]
+            head = [(arr_ud, "scroll"), ("PgUp/Dn", "page")]
             if self.overlay == "mirrors":
-                items.insert(0, ("r", "refresh"))
-        elif self.report is None:
-            items = [
+                head.insert(0, ("r", "refresh"))
+            return head, [("Esc/q", "close")]
+        if self.report is None:
+            return [
                 ("/", "search"),
                 ("1-3", "examples"),
                 ("p", "providers"),
                 ("m", "mirrors"),
-                ("?", "help"),
-                ("q", "quit"),
-            ]
-        else:
-            items = [
-                ("↑↓", "move"),
-                ("←→", "focus"),
-                ("J/K", "scroll"),
-                ("Tab", "bucket"),
-                ("s", "star"),
-                ("/", "search"),
-                ("\\", "filter"),
-                ("S", "sort"),
-                ("f", "refine"),
-                ("e", "explain"),
-                ("o", "open"),
-                ("c", "copy"),
-                ("d", "pdf"),
-                ("x", "export"),
-                ("?", "help"),
-                ("q", "quit"),
-            ]
-        chunks = [f"{t.cyan(k)} {t.dim(v)}" for k, v in items]
-        out = " "
-        for chunk in chunks:
-            cand = (out + "  " + chunk) if out.strip() else (" " + chunk)
-            if ui.visible_len(cand) > cols:
+            ], [("?", "help"), ("q", "quit")]
+        return [
+            (arr_ud, "move"),
+            (arr_lr, "focus"),
+            ("J/K", "scroll"),
+            ("Tab", "bucket"),
+            ("s", "star"),
+            ("/", "search"),
+            ("\\", "filter"),
+            ("S", "sort"),
+            ("f", "refine"),
+            ("e", "explain"),
+            ("o", "open"),
+            ("c", "copy"),
+            ("d", "pdf"),
+            ("x", "export"),
+        ], [("?", "help"), ("q", "quit")]
+
+    def _keybar_lines(self, cols: int, *, max_lines: int = 2) -> list[str]:
+        t = self.theme
+        head, tail = self._keybar_items()
+        head_chunks = [f"{t.cyan(k)} {t.dim(v)}" for k, v in head]
+        tail_chunks = [f"{t.cyan(k)} {t.dim(v)}" for k, v in tail]
+        rows: list[list[str]] = [[]]
+        for chunk in head_chunks:
+            cand = " " + "  ".join([*rows[-1], chunk])
+            if ui.visible_len(cand) <= cols - 1 or not rows[-1]:
+                rows[-1].append(chunk)
+            elif len(rows) < max_lines:
+                rows.append([chunk])
+            else:
                 break
-            out = cand
-        return out
+
+        tail_joined = "  ".join(tail_chunks)
+        if tail_joined:
+            while rows[-1]:
+                cand = " " + "  ".join([*rows[-1], tail_joined])
+                if ui.visible_len(cand) <= cols - 1:
+                    rows[-1].extend(tail_chunks)
+                    break
+                rows[-1].pop()
+            else:
+                if len(rows) < max_lines:
+                    rows.append(list(tail_chunks))
+                else:
+                    rows[-1] = list(tail_chunks)
+        return [" " + "  ".join(r) for r in rows if r] or [" " + tail_joined]
+
+    def _keybar(self, cols: int) -> str:
+        return self._keybar_lines(cols, max_lines=1)[0]
 
     def _render_welcome(self, cols: int, height: int) -> list[str]:
         t = self.theme
         box_w = min(cols - 2, 78)
         inner = max(24, box_w - 4)
-        tl, tr, bl, br, h, v = ("╭", "╮", "╰", "╯", "─", "│") if t.unicode else ("+", "+", "+", "+", "-", "|")
+        tl, tr, bl, br, h, v = t.box_chars
 
         def box_row(content: str) -> str:
             content = _pad_visible(content, inner, unicode=t.unicode)
@@ -1278,9 +1305,7 @@ class TuiApp:
         inner_w = max(8, width - 4)
         inner_h = max(1, height - 2)
 
-        tl, tr, bl, br, h, v = (
-            ("╭", "╮", "╰", "╯", "─", "│") if t.unicode else ("+", "+", "+", "+", "-", "|")
-        )
+        tl, tr, bl, br, h, v = t.box_chars
         border_paint = t.cyan if active else t.dim
         title_paint = (lambda s: t.paint(s, "bold", "cyan")) if active else t.bold
 
@@ -1298,16 +1323,17 @@ class TuiApp:
             thumb_start = round((view_offset / max_off) * max(0, inner_h - thumb_size))
 
         out = [top]
+        thumb_glyph = t.scroll_thumb
         for row in range(inner_h):
             content = body_lines[row] if row < len(body_lines) else ""
             padded = _pad_visible(content, inner_w, unicode=t.unicode)
             if has_scroll:
                 is_thumb = thumb_start <= row < thumb_start + thumb_size
                 bar_char = (
-                    (t.cyan("┃") if active else t.dim("┃"))
-                    if (is_thumb and t.unicode)
-                    else (t.cyan("#") if (is_thumb and active) else t.dim("#" if is_thumb else "|"))
-                ) if is_thumb else border_paint(v)
+                    (t.cyan(thumb_glyph) if active else t.dim(thumb_glyph))
+                    if is_thumb
+                    else border_paint(v)
+                )
                 out.append(f"{border_paint(v)} {padded} {bar_char}")
             else:
                 out.append(f"{border_paint(v)} {padded} {border_paint(v)}")
@@ -1334,8 +1360,7 @@ class TuiApp:
                 tabs.append(t.dim(raw))
 
         if self.starred or self.shortlist_active:
-            star_glyph = "★" if t.unicode else "*"
-            sraw = f" [4] {star_glyph} Shortlist ({len(self.starred)}) "
+            sraw = f" [4] {t.star} Shortlist ({len(self.starred)}) "
             if self.shortlist_active:
                 tabs.append(t.paint(sraw, "bold", "magenta", "reverse"))
             else:
@@ -1481,12 +1506,12 @@ class TuiApp:
         self.scroll[b] = top
 
         lines: list[str] = []
-        star_on = "★" if t.unicode else "*"
+        star_on = t.star
         for idx in range(top, min(len(findings), top + per_page)):
             f = findings[idx]
             is_sel = idx == sel
             is_star = f.paper.key() in self.starred
-            ptr = t.paint("▸" if t.unicode else ">", "bold", "cyan") if is_sel else " "
+            ptr = t.paint(t.pointer, "bold", "cyan") if is_sel else " "
             star = t.magenta(star_on) if is_star else " "
             title = ui.truncate(f.paper.title, max(12, width - 8), unicode=t.unicode)
             title_s = t.paint(title, "bold", "cyan") if is_sel else t.bold(title)
@@ -1501,7 +1526,7 @@ class TuiApp:
             if f.access and f.access.scihub:
                 pills.append(t.cyan("SH"))
             if f.verdict.direction == "aligned":
-                pills.append(t.green("→" if t.unicode else "->"))
+                pills.append(t.green(t.arrow))
             elif f.verdict.direction == "descriptive":
                 pills.append(t.yellow("~"))
             elif f.verdict.direction == "reversed":
@@ -1543,7 +1568,7 @@ class TuiApp:
         if p.sources:
             id_parts.append(t.dim("[" + ",".join(p.sources) + "]"))
         if p.key() in self.starred:
-            id_parts.append(t.magenta("★ starred" if t.unicode else "* starred"))
+            id_parts.append(t.magenta(f"{t.star} starred"))
         if (Path("papers") / filename_for(p)).exists():
             id_parts.append(t.green("PDF saved"))
         if id_parts:
@@ -1612,6 +1637,9 @@ class TuiApp:
     def _draw(self) -> None:
         size = shutil.get_terminal_size((100, 30))
         lines = self.render_lines(size.columns, size.lines)
+        if lines == getattr(self, "_last_drawn_lines", None):
+            return
+        self._last_drawn_lines = list(lines)
         frame = (
             "\x1b[?2026h"
             + "".join(f"\x1b[{row};1H{line}\x1b[K" for row, line in enumerate(lines, start=1))
@@ -1642,17 +1670,20 @@ class TuiApp:
 
             reader = _read_key_windows if sys.platform == "win32" else _read_key_posix
             last_size = shutil.get_terminal_size((100, 30))
+            last_busy_draw = 0.0
+            self._last_drawn_lines = None
             self._dirty = True
             while self._running:
                 cur_size = shutil.get_terminal_size((100, 30))
-                if self._dirty or cur_size != last_size or self.is_busy:
+                now = time.monotonic()
+                if self._dirty or cur_size != last_size or (self.is_busy and now - last_busy_draw >= 0.25):
                     self._draw()
                     last_size = cur_size
+                    last_busy_draw = now
                     self._dirty = False
                 key = reader(0.12)
-                if key:
-                    if not self.handle_key(key):
-                        break
+                if key and not self.handle_key(key):
+                    break
         finally:
             if old_termios is not None:
                 import termios

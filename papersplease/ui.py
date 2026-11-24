@@ -67,11 +67,9 @@ def _enable_windows_vt(stream: TextIO | None = None) -> bool:
             mode = ctypes.c_uint32()
             if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                 vt_flag = 0x0004  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
-                if mode.value & vt_flag:
+                if (mode.value & vt_flag) or kernel32.SetConsoleMode(handle, mode.value | vt_flag):
                     ok = True
-                elif kernel32.SetConsoleMode(handle, mode.value | vt_flag):
-                    ok = True
-    except Exception:
+    except Exception:  # noqa: BLE001 - ctypes failure simply disables VT escapes
         ok = False
 
     if not ok and (
@@ -114,7 +112,23 @@ def color_enabled(stream: TextIO | None = None) -> bool:
     return True
 
 
+def _is_legacy_win_console(stream: TextIO | None = None) -> bool:
+    """True when running in legacy Windows conhost rather than WT or a pipe."""
+    if sys.platform != "win32":
+        return False
+    target = _stream(stream)
+    if not getattr(target, "isatty", lambda: False)():
+        return False
+    return not any(
+        os.environ.get(var)
+        for var in ("WT_SESSION", "TERM_PROGRAM", "ConEmuANSI", "ANSICON")
+    )
+
+
 def unicode_enabled(stream: TextIO | None = None) -> bool:
+    mode = os.environ.get("PAPERSPLEASE_ASCII", "").strip().lower()
+    if mode in {"1", "true", "yes", "on"}:
+        return False
     encoding = (getattr(_stream(stream), "encoding", "") or "").lower()
     return "utf" in encoding
 
@@ -142,7 +156,7 @@ class Progress:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    def __enter__(self) -> "Progress":
+    def __enter__(self) -> Progress:  # noqa: PYI034 - Self requires Python 3.11+
         if not self.enabled:
             return self
         self._thread = threading.Thread(target=self._spin, daemon=True)
@@ -150,14 +164,10 @@ class Progress:
         return self
 
     def _spin(self) -> None:
-        frames = (
-            ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-            if unicode_enabled(self.stream)
-            else ["-", "\\", "|", "/"]
-        )
+        frames = Theme.auto(self.stream).spinner_frames
         index = 0
         started = time.monotonic()
-        while not self._stop.wait(0.12):
+        while not self._stop.wait(0.16):
             elapsed = time.monotonic() - started
             frame = frames[index % len(frames)]
             index += 1
@@ -194,13 +204,15 @@ class LivePanel:
         *,
         stream: TextIO | None = None,
         clear_on_exit: bool = True,
+        show_brand: bool = True,
     ):
         self.title = title
         self.subtitle = subtitle
         self.stream = stream or sys.stderr
         self.clear_on_exit = clear_on_exit
+        self.show_brand = show_brand
         self.enabled = vt_enabled(self.stream)
-        self.theme = Theme(enabled=color_enabled(self.stream), unicode=unicode_enabled(self.stream))
+        self.theme = Theme.auto(self.stream)
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -305,7 +317,7 @@ class LivePanel:
 
     def _format_sources(self) -> str:
         parts: list[str] = []
-        spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] if self.theme.unicode else ["-", "\\", "|", "/"]
+        spinner = self.theme.spinner_frames
         spin = spinner[self._frame % len(spinner)]
         for name, status in self._sources.items():
             short = name.replace("semanticscholar", "s2").replace("europepmc", "epmc")
@@ -324,14 +336,18 @@ class LivePanel:
         inner = max(20, width - 4)
         t = self.theme
         elapsed = f"{time.monotonic() - self._started:4.1f}s"
-        tl, tr, bl, br, h, v = ("╭", "╮", "╰", "╯", "─", "│") if t.unicode else ("+", "+", "+", "+", "-", "|")
-        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] if t.unicode else ["-", "\\", "|", "/"]
+        tl, tr, bl, br, h, v = t.box_chars
+        frames = t.spinner_frames
         spin = frames[self._frame % len(frames)]
 
         head_right = f" {t.dim(elapsed)} "
         max_left = max(14, width - 4 - visible_len(head_right))
-        title_shown = truncate(self.title, max(4, max_left - 18), unicode=t.unicode)
-        head_left = f" {t.paint('PapersPlease', 'bold', 'cyan')} {t.dim(t.sep)} {t.dim(title_shown)} "
+        if self.show_brand:
+            title_shown = truncate(self.title, max(4, max_left - 18), unicode=t.unicode)
+            head_left = f" {t.paint('PapersPlease', 'bold', 'cyan')} {t.dim(t.sep)} {t.dim(title_shown)} "
+        else:
+            title_shown = truncate(self.title, max(4, max_left - 4), unicode=t.unicode)
+            head_left = f" {t.bold(title_shown)} "
         if visible_len(head_left) > max_left:
             head_left = truncate_ansi(head_left, max_left, unicode=t.unicode)
         fill_len = max(1, width - 3 - visible_len(head_left) - visible_len(head_right))
@@ -395,10 +411,10 @@ class LivePanel:
 
     def _loop(self) -> None:
         self._draw()
-        while not self._stop.wait(0.12):
+        while not self._stop.wait(0.20):
             self._draw()
 
-    def __enter__(self) -> "LivePanel":
+    def __enter__(self) -> LivePanel:  # noqa: PYI034 - Self requires Python 3.11+
         if not self.enabled:
             return self
         self._started = time.monotonic()
@@ -436,10 +452,16 @@ def live_panel(
 class Theme:
     enabled: bool = False
     unicode: bool = True
+    rich_unicode: bool = True
 
     @classmethod
-    def auto(cls, stream: TextIO | None = None) -> "Theme":
-        return cls(enabled=color_enabled(stream), unicode=unicode_enabled(stream))
+    def auto(cls, stream: TextIO | None = None) -> Theme:
+        uni = unicode_enabled(stream)
+        return cls(
+            enabled=color_enabled(stream),
+            unicode=uni,
+            rich_unicode=uni and not _is_legacy_win_console(stream),
+        )
 
     def paint(self, text: str, *names: str) -> str:
         if not self.enabled or not names:
@@ -477,19 +499,45 @@ class Theme:
 
     @property
     def half(self) -> str:
-        return "◐" if self.unicode else "~"
+        return "◐" if (self.unicode and self.rich_unicode) else "~"
 
     @property
     def arrow(self) -> str:
-        return "↗" if self.unicode else "->"
+        return "→" if self.unicode else "->"
 
     @property
     def check(self) -> str:
-        return "✓" if self.unicode else "ok"
+        return "✓" if (self.unicode and self.rich_unicode) else "ok"
 
     @property
     def cross(self) -> str:
-        return "✗" if self.unicode else "x"
+        return "×" if self.unicode else "x"
+
+    @property
+    def star(self) -> str:
+        return "★" if (self.unicode and self.rich_unicode and sys.platform != "win32") else "*"
+
+    @property
+    def pointer(self) -> str:
+        return "▸" if self.unicode else ">"
+
+    @property
+    def scroll_thumb(self) -> str:
+        return "┃" if self.unicode else "#"
+
+    @property
+    def box_chars(self) -> tuple[str, str, str, str, str, str]:
+        if not self.unicode:
+            return ("+", "+", "+", "+", "-", "|")
+        if self.rich_unicode:
+            return ("╭", "╮", "╰", "╯", "─", "│")
+        return ("┌", "┐", "└", "┘", "─", "│")
+
+    @property
+    def spinner_frames(self) -> list[str]:
+        if self.unicode and self.rich_unicode:
+            return ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        return ["-", "\\", "|", "/"]
 
     @property
     def sep(self) -> str:

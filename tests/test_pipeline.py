@@ -7,7 +7,6 @@ from papersplease.models import Paper
 from papersplease.pipeline import find, merge_papers, screen_only
 from papersplease.sources import SourceResult
 
-
 SETTINGS = Settings(
     cache=False,
     mirrors=["https://sci-hub.se", "https://sci-hub.st"],
@@ -203,6 +202,77 @@ class ScreenOnlyTests(unittest.TestCase):
         self.assertEqual(buckets["Muscle strength in older adults"], "in_scope")
         self.assertEqual(buckets["Muscle anatomy atlas"], "out_of_scope")
         self.assertIsNone(findings[0].access)
+
+
+class PipelineRegressionTests(unittest.TestCase):
+    def test_merge_keeps_all_distinct_dois_with_identical_title(self):
+        p1 = Paper(title="Duplicate Study Title", doi="10.1/a")
+        p2 = Paper(title="Duplicate Study Title", doi="10.1/b")
+        p3 = Paper(title="Duplicate Study Title", doi="10.1/c")
+        merged = merge_papers([p1, p2, p3])
+        self.assertEqual({p.doi for p in merged}, {"10.1/a", "10.1/b", "10.1/c"})
+
+    def test_paper_merge_prefers_published_year_over_preprint(self):
+        pre = Paper(title="Shared Study", arxiv_id="2301.00001", year=2023, type="preprint")
+        pub = Paper(
+            title="Shared Study",
+            doi="10.1/pub",
+            journal="Nature",
+            year=2024,
+            type="journal-article",
+        )
+        first = Paper(title=pre.title, arxiv_id=pre.arxiv_id, year=pre.year, type=pre.type)
+        first.merge(pub)
+        self.assertEqual(first.year, 2024)
+        self.assertEqual(first.journal, "Nature")
+        self.assertEqual(first.type, "journal-article")
+
+        second = Paper(
+            title=pub.title, doi=pub.doi, journal=pub.journal, year=pub.year, type=pub.type
+        )
+        second.merge(pre)
+        self.assertEqual(second.year, 2024)
+        self.assertEqual(second.arxiv_id, "2301.00001")
+
+    def test_access_cache_respects_oa_and_probe_flags(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from papersplease import resolver, store
+        from papersplease.pipeline import _access
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Settings(cache=True, cache_dir=Path(tmp))
+            caches = store.Caches(cfg, enabled=True)
+            paper = Paper(title="OA Study", doi="10.1/oa")
+            full = resolver.Access(
+                doi="10.1/oa",
+                doi_url="https://doi.org/10.1/oa",
+                open_access=[{"url": "https://oa.example/a.pdf", "kind": "oa"}],
+            )
+            no_oa = resolver.Access(doi="10.1/oa", doi_url="https://doi.org/10.1/oa", open_access=[])
+            with patch.object(resolver, "access_for", side_effect=[full, no_oa]) as mock_af:
+                got1 = _access(paper, cfg, caches, probe=True, include_oa=True)
+                got2 = _access(paper, cfg, caches, probe=False, include_oa=False)
+                self.assertEqual(mock_af.call_count, 2)
+                self.assertEqual(len(got1.open_access), 1)
+                self.assertEqual(got2.open_access, [])
+
+    def test_read_one_surfaces_error_in_read_note(self):
+        from unittest.mock import patch
+
+        from papersplease import reading, sources
+        from papersplease.pipeline import read_one
+
+        paper = Paper(title="Deep Read Study", doi="10.1/deep")
+        with (
+            patch.object(sources, "resolve_identifier", return_value=paper),
+            patch.object(reading, "read", side_effect=RuntimeError("boom")),
+        ):
+            out = read_one("10.1/deep", settings=SETTINGS, deep=True)
+        self.assertIsNotNone(out)
+        self.assertIn("read failed", out.read_note or "")
 
 
 if __name__ == "__main__":

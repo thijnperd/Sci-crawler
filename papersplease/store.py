@@ -20,6 +20,7 @@ import json
 import os
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +31,7 @@ VERDICT_TTL = 30 * 24 * 3600.0
 ACCESS_TTL = 6 * 3600.0
 # Bump when the screening rules change: a cached verdict is only valid for the
 # rules that produced it, so the version is part of the cache key.
-SCREENING_VERSION = 2
+SCREENING_VERSION = 3
 
 
 def fingerprint(spec: ScopeSpec) -> str:
@@ -146,12 +147,48 @@ class Caches:
 
     # -- access ----------------------------------------------------------- #
 
-    def get_access(self, doi: str) -> dict[str, Any] | None:
-        raw = self.access.get(hashlib.sha1(doi.encode()).hexdigest())
+    def _access_key(
+        self,
+        doi: str,
+        *,
+        include_oa: bool = True,
+        probe: bool = True,
+        mirrors: Sequence[str] = (),
+    ) -> str:
+        payload = {
+            "doi": doi.lower(),
+            "oa": bool(include_oa),
+            "probe": bool(probe),
+            "mirrors": list(mirrors),
+        }
+        return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    def get_access(
+        self,
+        doi: str,
+        *,
+        include_oa: bool = True,
+        probe: bool = True,
+        mirrors: Sequence[str] = (),
+    ) -> dict[str, Any] | None:
+        raw = self.access.get(
+            self._access_key(doi, include_oa=include_oa, probe=probe, mirrors=mirrors)
+        )
         return raw if isinstance(raw, dict) else None
 
-    def put_access(self, doi: str, payload: dict[str, Any]) -> None:
-        self.access.put(hashlib.sha1(doi.encode()).hexdigest(), payload)
+    def put_access(
+        self,
+        doi: str,
+        payload: dict[str, Any],
+        *,
+        include_oa: bool = True,
+        probe: bool = True,
+        mirrors: Sequence[str] = (),
+    ) -> None:
+        self.access.put(
+            self._access_key(doi, include_oa=include_oa, probe=probe, mirrors=mirrors),
+            payload,
+        )
 
     # -- lifecycle -------------------------------------------------------- #
 

@@ -20,7 +20,7 @@ from .net import Blocked, FetchError, fetch, fetch_json, query_url
 
 _HEALTH_TTL = 600.0
 _health_lock = threading.Lock()
-_health_cache: dict[tuple[str, ...], tuple[float, list["MirrorStatus"]]] = {}
+_health_cache: dict[tuple[str, ...], tuple[float, list[MirrorStatus]]] = {}
 
 
 @dataclass
@@ -78,7 +78,7 @@ def _probe(mirror: str, settings: Settings) -> MirrorStatus:
     except FetchError as exc:
         state = "unreachable" if exc.status is None else "error"
         return MirrorStatus(mirror, state, exc.status, None, exc.message)
-    except Exception as exc:  # never let a probe kill the run
+    except Exception as exc:  # noqa: BLE001 - never let a probe kill the run
         return MirrorStatus(mirror, "unreachable", None, None, type(exc).__name__)
     latency = int((time.monotonic() - started) * 1000)
     return MirrorStatus(mirror, "ok", 200, latency, "reachable")
@@ -288,7 +288,7 @@ def download_any(
 def download(url: str, destination: str, settings: Settings) -> tuple[bool, str]:
     """Fetch a PDF to disk and verify it really is a PDF."""
     try:
-        raw = fetch(url, settings, cache_ttl=0, timeout=90)
+        raw = fetch(url, settings, cache_ttl=0, timeout=25.0, retries=0)
     except FetchError as exc:
         return False, f"download failed: {exc.status or exc.message}"
     if not raw.startswith(b"%PDF"):

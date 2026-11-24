@@ -7,18 +7,18 @@ decoration -- a paper about "muscle" is not a paper about "muscle strength in
 older adults".
 """
 
-from .models import Paper, ScopeSpec, Facet, Verdict
-from .pipeline import find, screen_only, read_one
+from .models import Facet, Paper, ScopeSpec, Verdict
+from .pipeline import find, read_one, screen_only
 
 __all__ = [
+    "Facet",
     "Paper",
     "ScopeSpec",
-    "Facet",
     "Verdict",
-    "find",
-    "screen_only",
-    "read_one",
     "__version__",
+    "find",
+    "read_one",
+    "screen_only",
 ]
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"

@@ -16,8 +16,9 @@ from __future__ import annotations
 import json
 import sys
 import traceback
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from . import __version__, export
 from .config import Settings
@@ -549,6 +550,17 @@ def _ok(message_id: Any, result: dict[str, Any]) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": message_id, "result": result}
 
 
+def _configure_stdio() -> None:
+    """Force UTF-8 on stdio streams so Windows pipes do not fail with cp1252."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 def handle_message(message: Any, settings: Settings) -> dict[str, Any] | None:
     """Handle one JSON-RPC message. Returns None for notifications."""
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
@@ -556,9 +568,20 @@ def handle_message(message: Any, settings: Settings) -> dict[str, Any] | None:
     method = message.get("method")
     message_id = message.get("id")
     is_notification = "id" not in message
+    if not isinstance(method, str) or not method:
+        return None if is_notification else _error(message_id, -32600, "method must be a string")
+
+    raw_params = message.get("params")
+    if raw_params is not None and not isinstance(raw_params, dict):
+        return (
+            None
+            if is_notification
+            else _error(message_id, -32602, "params must be an object when provided")
+        )
+    params: dict[str, Any] = raw_params or {}
 
     if method == "initialize":
-        requested = (message.get("params") or {}).get("protocolVersion")
+        requested = params.get("protocolVersion")
         version = requested if requested in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0]
         return _ok(
             message_id,
@@ -594,7 +617,6 @@ def handle_message(message: Any, settings: Settings) -> dict[str, Any] | None:
     if method == "prompts/list":
         return _ok(message_id, {"prompts": []})
     if method == "tools/call":
-        params = message.get("params") or {}
         name = params.get("name")
         arguments = params.get("arguments") or {}
         if name not in TOOLS:
@@ -616,7 +638,7 @@ def handle_message(message: Any, settings: Settings) -> dict[str, Any] | None:
             )
         except ToolError as exc:
             return _ok(message_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True})
-        except Exception as exc:  # report, never crash the server
+        except Exception as exc:  # noqa: BLE001 - report, never crash the server
             traceback.print_exc(file=sys.stderr)
             return _ok(
                 message_id,
@@ -632,6 +654,7 @@ def handle_message(message: Any, settings: Settings) -> dict[str, Any] | None:
 
 def serve(settings: Settings | None = None) -> int:
     """Run the stdio server until stdin closes. Logs go to stderr only."""
+    _configure_stdio()
     settings = settings or Settings.from_env()
     stdin = sys.stdin
     stdout = sys.stdout
@@ -643,16 +666,25 @@ def serve(settings: Settings | None = None) -> int:
         line = line.strip()
         if not line:
             continue
+        response: Any = None
         try:
             message = json.loads(line)
         except ValueError:
-            response: dict[str, Any] | None = _error(None, -32700, "parse error")
+            response = _error(None, -32700, "parse error")
         else:
-            if isinstance(message, list):
-                replies = [r for r in (handle_message(m, settings) for m in message) if r]
-                response = replies  # JSON-RPC batch
-            else:
-                response = handle_message(message, settings)
+            try:
+                if isinstance(message, list):
+                    if not message:
+                        response = _error(None, -32600, "empty batch")
+                    else:
+                        replies = [r for r in (handle_message(m, settings) for m in message) if r]
+                        response = replies or None
+                else:
+                    response = handle_message(message, settings)
+            except Exception as exc:  # noqa: BLE001 - keep stdio loop alive on malformed message
+                traceback.print_exc(file=sys.stderr)
+                mid = message.get("id") if isinstance(message, dict) else None
+                response = _error(mid, -32603, f"internal error: {exc}")
         if response is None:
             continue
         stdout.write(json.dumps(response, ensure_ascii=False) + "\n")

@@ -8,15 +8,19 @@ crawler left to a human), and only then attaches Sci-Hub links to what survived.
 
 from __future__ import annotations
 
+import os
+import sys
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any
 
 from . import filters, reading, resolver, screening, sources, store
 from .config import Settings
 from .intent import exclusion_terms, parse_intent
 from .models import Paper, ScopeSpec, Verdict, title_key
 
+SearchFilter = Callable[..., sources.SourceResult]
 Searcher = Callable[..., sources.SourceResult]
 ProgressCallback = Callable[[str, dict[str, Any]], None]
 
@@ -26,8 +30,10 @@ def _emit(on_progress: ProgressCallback | None, stage: str, **data: Any) -> None
         return
     try:
         on_progress(stage, data)
-    except Exception:  # never let a UI callback break the pipeline
-        pass
+    except Exception as exc:  # isolate UI callback unless debugging
+        if os.environ.get("PAPERSPLEASE_DEBUG"):
+            raise
+        print(f"papersplease warning: progress callback failed: {exc}", file=sys.stderr)
 
 
 @dataclass
@@ -211,9 +217,10 @@ def _access(
     probe: bool,
     include_oa: bool,
 ) -> resolver.Access:
-    """Resolve links, reusing a recent answer for the same DOI."""
+    """Resolve links, reusing a recent answer for the same DOI and access flags."""
+    mirrors = tuple(settings.mirrors)
     if paper.doi:
-        raw = caches.get_access(paper.doi)
+        raw = caches.get_access(paper.doi, include_oa=include_oa, probe=probe, mirrors=mirrors)
         if raw:
             try:
                 return resolver.Access(**raw)
@@ -221,7 +228,13 @@ def _access(
                 pass
     access = resolver.access_for(paper, settings, probe=probe, include_oa=include_oa)
     if paper.doi:
-        caches.put_access(paper.doi, access.to_dict())
+        caches.put_access(
+            paper.doi,
+            access.to_dict(),
+            include_oa=include_oa,
+            probe=probe,
+            mirrors=mirrors,
+        )
     return access
 
 
@@ -237,18 +250,20 @@ def merge_papers(papers: Iterable[Paper]) -> list[Paper]:
         else:
             by_key[key] = paper
 
-    by_title: dict[str, Paper] = {}
+    by_title: dict[str, list[Paper]] = {}
     for paper in by_key.values():
         key = title_key(paper.title)
-        existing = by_title.get(key)
-        if existing is None:
-            by_title[key] = paper
-        elif not existing.doi or not paper.doi:
-            existing.merge(paper)
-        else:
-            # Same title, two DOIs: keep both, the caller can see the duplication.
-            by_title[key + "#2"] = paper
-    return list(by_title.values())
+        bucket = by_title.setdefault(key, [])
+        merged = False
+        for existing in bucket:
+            if not existing.doi or not paper.doi:
+                existing.merge(paper)
+                merged = True
+                break
+        if not merged:
+            # Same title, distinct DOIs: keep every distinct DOI record.
+            bucket.append(paper)
+    return [paper for bucket in by_title.values() for paper in bucket]
 
 
 def _search_all(
@@ -277,7 +292,7 @@ def _search_all(
             name = futures[future]
             try:
                 result = future.result()
-            except Exception as exc:  # a broken adapter must not kill the run
+            except Exception as exc:  # noqa: BLE001 - a broken adapter must not kill the run
                 warnings.append(f"{name}: {type(exc).__name__}: {exc}")
                 _emit(on_progress, "source_done", source=name, count=0, ok=False, error=str(exc))
                 continue
@@ -408,17 +423,25 @@ def find(
             _emit(on_progress, "read", done=0, total=len(missing_abs))
             try:
                 reading.batch_fetch_abstracts(missing_abs, settings)
-            except Exception as exc:  # pragma: no cover - defensive
+            except Exception as exc:  # noqa: BLE001 - defensive
                 report.warnings.append(f"batch abstract lookup failed: {exc}")
             remaining = [p for p in missing_abs if not p.abstract and (p.pmid or p.pmcid or p.doi)][:12]
             done_count = len(missing_abs) - len(remaining)
             _emit(on_progress, "read", done=done_count, total=len(missing_abs))
-            for idx, paper in enumerate(remaining, start=done_count + 1):
-                try:
-                    reading.read(paper, settings)
-                except Exception as exc:  # pragma: no cover - defensive
-                    report.warnings.append(f"read failed for {paper.doi or paper.title[:40]}: {exc}")
-                _emit(on_progress, "read", done=idx, total=len(missing_abs))
+            if remaining:
+                completed = done_count
+                with ThreadPoolExecutor(max_workers=min(4, len(remaining))) as pool:
+                    futures = {pool.submit(reading.read, paper, settings): paper for paper in remaining}
+                    for future in as_completed(futures):
+                        paper = futures[future]
+                        try:
+                            future.result()
+                        except Exception as exc:  # noqa: BLE001 - defensive
+                            report.warnings.append(
+                                f"read failed for {paper.doi or paper.title[:40]}: {exc}"
+                            )
+                        completed += 1
+                        _emit(on_progress, "read", done=completed, total=len(missing_abs))
             _emit(on_progress, "read", done=len(missing_abs), total=len(missing_abs))
         else:
             _emit(on_progress, "read", done=0, total=0)
@@ -460,13 +483,20 @@ def find(
         if fresh:
             try:
                 reading.batch_fetch_abstracts([p for p in fresh if not p.abstract], settings)
-            except Exception:
-                pass
-            for paper in [p for p in fresh if not p.abstract][: max(12, expand_limit)]:
-                try:
-                    reading.read(paper, settings)
-                except Exception:  # a missing abstract must not end the run
-                    continue
+            except Exception as exc:  # noqa: BLE001 - a missing batch abstract must not end the run
+                report.warnings.append(f"expansion abstract lookup failed: {exc}")
+            fresh_missing = [p for p in fresh if not p.abstract][: max(12, expand_limit)]
+            if fresh_missing:
+                with ThreadPoolExecutor(max_workers=min(4, len(fresh_missing))) as pool:
+                    futures = {pool.submit(reading.read, paper, settings): paper for paper in fresh_missing}
+                    for future in as_completed(futures):
+                        paper = futures[future]
+                        try:
+                            future.result()
+                        except Exception as exc:  # noqa: BLE001 - a missing abstract must not end the run
+                            report.warnings.append(
+                                f"expand read failed for {paper.doi or paper.title[:40]}: {exc}"
+                            )
             merged.extend(fresh)
             verdicts.extend(_screen_all(fresh, spec, caches))
             report.candidates = len(merged)
@@ -517,7 +547,7 @@ def find(
                         f"{before[1]} -> {verdict.bucket}"
                     )
                 report.deep_reads += 1
-            except Exception as exc:  # pragma: no cover - defensive
+            except Exception as exc:  # noqa: BLE001 - defensive
                 report.warnings.append(f"deep read failed for {paper.doi or paper.title[:40]}: {exc}")
 
     ranked = screening.rank(merged, verdicts)
@@ -537,22 +567,44 @@ def find(
     findings = capped
     report.in_scope_total = in_scope_total
 
-    # Resolve access for what is actually being recommended.
-    access_limit = len(findings) if access_limit is None else access_limit
-    access_targets = [f for f in findings if f.verdict.bucket != "out_of_scope"][:access_limit]
+    # Resolve access only for what is shown: all displayed in_scope findings
+    # plus up to 6 adjacent candidates by default (not dozens of adjacent hits).
+    if access_limit is None:
+        in_scope_targets = [f for f in findings if f.verdict.bucket == "in_scope"]
+        adjacent_targets = [f for f in findings if f.verdict.bucket == "adjacent"][:6]
+        access_targets = in_scope_targets + adjacent_targets
+    else:
+        access_targets = [f for f in findings if f.verdict.bucket != "out_of_scope"][:access_limit]
     _emit(on_progress, "access", done=0, total=len(access_targets))
-    resolved = 0
-    for finding in access_targets:
+    if probe_mirrors and access_targets:
         try:
-            finding.access = _access(
-                finding.paper, settings, caches, probe=probe_mirrors, include_oa=include_oa
-            )
-            if finding.access.notes:
-                report.warnings.extend(finding.access.notes)
-            resolved += 1
-            _emit(on_progress, "access", done=resolved, total=len(access_targets))
-        except Exception as exc:  # pragma: no cover - defensive
-            report.warnings.append(f"access lookup failed for {finding.paper.doi}: {exc}")
+            resolver.mirror_health(settings)
+        except Exception as exc:  # noqa: BLE001 - best-effort mirror warm-up
+            report.warnings.append(f"mirror warm-up failed: {exc}")
+    resolved = 0
+    if access_targets:
+        with ThreadPoolExecutor(max_workers=min(4, len(access_targets))) as pool:
+            futures = {
+                pool.submit(
+                    _access,
+                    finding.paper,
+                    settings,
+                    caches,
+                    probe=probe_mirrors,
+                    include_oa=include_oa,
+                ): finding
+                for finding in access_targets
+            }
+            for future in as_completed(futures):
+                finding = futures[future]
+                try:
+                    finding.access = future.result()
+                    if finding.access.notes:
+                        report.warnings.extend(finding.access.notes)
+                except Exception as exc:  # noqa: BLE001 - defensive
+                    report.warnings.append(f"access lookup failed for {finding.paper.doi}: {exc}")
+                resolved += 1
+                _emit(on_progress, "access", done=resolved, total=len(access_targets))
 
     report.findings = findings
     caches.flush()
@@ -625,10 +677,10 @@ def read_one(
         return None
     try:
         reading.read(paper, settings, deep=deep)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - preserve metadata when deep read fails
+        paper.read_note = f"read failed: {type(exc).__name__}: {exc}"
     if paper.doi and not paper.oa_url:
-        oa, notes = resolver.oa_candidates(paper, settings)
+        oa, _notes = resolver.oa_candidates(paper, settings)
         if oa:
             paper.oa_url = oa[0]["url"]
             paper.is_oa = True

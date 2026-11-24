@@ -6,6 +6,7 @@ inside restricted agent sandboxes.
 
 from __future__ import annotations
 
+import base64
 import gzip
 import hashlib
 import json
@@ -81,8 +82,10 @@ def _cache_read(cache_dir: Path, url: str, ttl: float) -> bytes | None:
         return None
     try:
         payload = json.loads(path.read_text("utf-8"))
+        if "body_b64" in payload:
+            return base64.b64decode(payload["body_b64"].encode("ascii"), validate=True)
         return payload["body"].encode("utf-8")
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, UnicodeError):
         return None
 
 
@@ -90,8 +93,9 @@ def _cache_write(cache_dir: Path, url: str, body: bytes) -> None:
     path = _cache_path(cache_dir, url)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"url": url, "body": body.decode("utf-8", "replace")}), "utf-8")
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        encoded = base64.b64encode(body).decode("ascii")
+        tmp.write_text(json.dumps({"url": url, "body_b64": encoded}), "utf-8")
         os.replace(tmp, path)
     except OSError:
         pass

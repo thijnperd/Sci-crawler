@@ -2,8 +2,8 @@
 
 import unittest
 
-from papersplease.models import Paper, ScopeSpec
 from papersplease.intent import parse_intent
+from papersplease.models import Paper
 from papersplease.screening import combine, rank, screen_many, screen_one
 
 INTENT = "muscle strength in older adults"
@@ -391,6 +391,31 @@ class SenseDisambiguationAndRankingTests(unittest.TestCase):
 
         ranked = rank([adj_p, in_p], [adj_v, in_v])
         self.assertEqual(ranked[0][0].title, in_p.title)
+
+
+class RegressionGuardTests(unittest.TestCase):
+    def test_unicode_dashes_normalize_and_match_facets(self):
+        spec = parse_intent("muscle strength in older adults")
+        verdict = screen_one(
+            paper(
+                "Muscle\u2013strength training in older\u2014adults",
+                "Non\u2010invasive training improved maximal\u2212force.",
+            ),
+            spec,
+        )
+        self.assertEqual(verdict.bucket, "in_scope")
+
+    def test_rank_raises_on_length_mismatch(self):
+        spec = parse_intent("muscle")
+        papers = [paper("One", ""), paper("Two", ""), paper("Three", "")]
+        verdicts = [screen_one(papers[0], spec)]
+        with self.assertRaises(ValueError):
+            rank(papers, verdicts)
+
+    def test_parse_intent_rejects_invalid_min_scope(self):
+        for bad in (float("nan"), float("inf"), -0.1, 1.1):
+            with self.assertRaises(ValueError):
+                parse_intent("muscle strength", min_scope=bad)
 
 
 if __name__ == "__main__":

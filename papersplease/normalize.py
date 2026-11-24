@@ -143,7 +143,7 @@ _SHORTHAND: dict[str, str] = {
 
 _MARKER_RE = re.compile(
     r"(?<![a-z0-9])(" + "|".join(sorted(_DUTCH_MARKERS, key=len, reverse=True)) + r")(?![a-z0-9])",
-    re.I,
+    re.IGNORECASE,
 )
 
 
@@ -154,7 +154,7 @@ def _apply(text: str, mapping: dict[str, str]) -> tuple[str, list[str]]:
     pattern = re.compile(
         r"(?<![a-z0-9])(" + "|".join(re.escape(key) for key in sorted(mapping, key=len, reverse=True))
         + r")(?![a-z0-9])",
-        re.I,
+        re.IGNORECASE,
     )
     changes: list[str] = []
 

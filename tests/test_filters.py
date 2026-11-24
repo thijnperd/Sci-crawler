@@ -75,6 +75,13 @@ class FilterTests(unittest.TestCase):
         filtered = apply([first, second], authors=["Schoenfeld"])
         self.assertEqual([p.title for p in filtered], ["First", "Second"])
 
+    def test_word_boundary_matches_prevent_false_prefix_hits(self):
+        self.assertFalse(keep(paper(authors=["Lindqvist A"]), authors=["Li"]))
+        self.assertTrue(keep(paper(authors=["Wei Li"]), authors=["Li"]))
+        self.assertTrue(keep(paper(authors=["Li J"]), authors=["Li"]))
+        self.assertFalse(keep(paper(journal="Signatures"), venues=["Nature"]))
+        self.assertTrue(keep(paper(journal="Nature Medicine"), venues=["Nature"]))
+
 
 if __name__ == "__main__":
     unittest.main()

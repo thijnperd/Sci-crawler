@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -39,6 +40,41 @@ from .sources import SOURCE_INFO, arxiv_id, fetch_by_arxiv, fetch_by_doi, resolv
 _COMMANDS = {"find", "check", "read", "download", "explain", "providers", "mirrors", "tui", "mcp"}
 
 
+def _configure_stdio() -> None:
+    """Use UTF-8 on piped stdio streams so Windows cp1252 pipes do not fail."""
+    streams: list[object] = [sys.stdout, sys.stderr]
+    if not getattr(sys.stdin, "isatty", lambda: False)():
+        streams.append(sys.stdin)
+    for stream in streams:
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
+def _scope_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or not (0.0 <= parsed <= 1.0):
+        raise argparse.ArgumentTypeError("must be between 0.0 and 1.0")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return parsed
+
+
+def _non_neg_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return parsed
+
+
 def _add_common(
     parser: argparse.ArgumentParser,
     *,
@@ -47,8 +83,8 @@ def _add_common(
 ) -> None:
     screen = screen_target or parser
     output = output_target or parser
-    screen.add_argument("--min-scope", type=float, default=None,
-                        help="coverage required to count as in scope (default 0.7)")
+    screen.add_argument("--min-scope", type=_scope_float, default=None,
+                        help="coverage required to count as in scope (0.0-1.0, default 0.7)")
     screen.add_argument("--require", action="append", default=[],
                         help="concept that must be present (repeatable)")
     screen.add_argument("--require-in", choices=("title", "abstract", "title_or_abstract"),
@@ -90,7 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
     find_p.add_argument("intent", nargs="+", help="what you want, in words")
 
     search = find_p.add_argument_group("search")
-    search.add_argument("--limit", type=int, default=15,
+    search.add_argument("--limit", type=_positive_int, default=15,
                         help="show at most N in-scope papers; also sizes the candidate pool (~2x per source)")
     search.add_argument("--sources", metavar="LIST",
                         help="comma-separated subset of europepmc,crossref,arxiv,semanticscholar,openalex")
@@ -100,7 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="author name must contain this (repeatable)")
     search.add_argument("--venue", action="append", default=[],
                         help="journal/venue must contain this (repeatable)")
-    search.add_argument("--min-citations", type=int, help="drop papers with fewer citations")
+    search.add_argument("--min-citations", type=_non_neg_int, help="drop papers with fewer citations")
     search.add_argument("--type", action="append", choices=PAPER_TYPES,
                         help="publication type (repeatable)")
     search.add_argument("--peer-reviewed", action="store_true",
@@ -108,14 +144,14 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--preprints-only", action="store_true",
                         help="shortcut for --type preprint")
     search.add_argument("--deep", action="store_true", help="read open-access full text and re-check scope")
-    search.add_argument("--deep-limit", type=int, default=5, help="how many papers to deep-read (default 5)")
+    search.add_argument("--deep-limit", type=_positive_int, default=5, help="how many papers to deep-read (default 5)")
     search.add_argument("--llm", dest="use_llm", action="store_true", default=None,
                         help="use the LLM second opinion (needs PAPERSPLEASE_LLM_KEY)")
     search.add_argument("--no-llm", dest="use_llm", action="store_false",
                         help="lexical screening only")
     search.add_argument("--expand", choices=("citations", "references", "both"), default="none",
                         help="walk one citation-graph hop from the best matches and screen the result")
-    search.add_argument("--expand-limit", type=int, default=25,
+    search.add_argument("--expand-limit", type=_positive_int, default=25,
                         help="candidates to add when expanding (default 25)")
 
     screening = find_p.add_argument_group("screening")
@@ -145,7 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     read_p = sub.add_parser("read", help="read one paper by DOI, arXiv id or title")
     read_p.add_argument("target", nargs="+", help="DOI, arXiv id, URL or title")
     read_p.add_argument("--deep", action="store_true", help="pull open-access full text")
-    read_p.add_argument("--chars", type=int, default=4000)
+    read_p.add_argument("--chars", type=_positive_int, default=4000)
     read_p.add_argument("--json", action="store_true")
 
     download_p = sub.add_parser(
@@ -228,30 +264,30 @@ def _cmd_find(args: argparse.Namespace) -> int:
     settings = _settings(args)
     intent = " ".join(args.intent)
     sources = [s.strip() for s in args.sources.split(",")] if args.sources else None
-    find_kwargs = dict(
-        limit=args.limit,
-        source_names=sources,
-        deep=args.deep,
-        deep_limit=args.deep_limit,
-        use_llm=args.use_llm,
-        min_scope=args.min_scope,
-        require=_require_list(args),
-        exclude=_exclude_list(args),
-        since=args.since,
-        until=args.until,
-        authors=args.author,
-        venues=args.venue,
-        min_citations=args.min_citations,
-        types=args.type or (),
-        peer_reviewed=args.peer_reviewed,
-        preprints_only=args.preprints_only,
-        probe_mirrors=not args.no_mirror_probe,
-        include_oa=not args.no_oa,
-        require_in=args.require_in or "",
-        expand=args.expand,
-        expand_limit=args.expand_limit,
-        use_cache=False if args.refresh else None,
-    )
+    find_kwargs = {
+        "limit": args.limit,
+        "source_names": sources,
+        "deep": args.deep,
+        "deep_limit": args.deep_limit,
+        "use_llm": args.use_llm,
+        "min_scope": args.min_scope,
+        "require": _require_list(args),
+        "exclude": _exclude_list(args),
+        "since": args.since,
+        "until": args.until,
+        "authors": args.author,
+        "venues": args.venue,
+        "min_citations": args.min_citations,
+        "types": args.type or (),
+        "peer_reviewed": args.peer_reviewed,
+        "preprints_only": args.preprints_only,
+        "probe_mirrors": not args.no_mirror_probe,
+        "include_oa": not args.no_oa,
+        "require_in": args.require_in or "",
+        "expand": args.expand,
+        "expand_limit": args.expand_limit,
+        "use_cache": False if args.refresh else None,
+    }
 
     wants_tui = (
         getattr(args, "interactive", False)
@@ -374,19 +410,19 @@ def _cmd_check(args: argparse.Namespace) -> int:
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
+    min_scope = args.min_scope if args.min_scope is not None else settings.min_scope
+    spec = parse_intent(
+        intent,
+        min_scope=min_scope,
+        require=_require_list(args),
+        exclude=_exclude_list(args),
+        require_in=args.require_in or "",
+    )
     if fmt == "md":
-        report = Report(
-            spec=parse_intent(intent, min_scope=args.min_scope or 0.7),
-            findings=findings,
-            candidates=len(findings),
-        )
+        report = Report(spec=spec, findings=findings, candidates=len(findings))
         print(render_markdown(report))
         return 0
-    report = Report(
-        spec=parse_intent(intent, min_scope=args.min_scope or 0.7),
-        findings=findings,
-        candidates=len(findings),
-    )
+    report = Report(spec=spec, findings=findings, candidates=len(findings))
     print(render_text(report, origin="supplied list"), end="")
     return 0
 
@@ -542,6 +578,7 @@ HANDLERS = {
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     # Allow `papersplease "muscle strength in older adults"` without a subcommand.

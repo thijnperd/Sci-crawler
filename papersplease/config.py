@@ -49,7 +49,7 @@ class Settings:
     llm_json_mode: bool = True
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         settings = cls()
         settings.mailto = os.environ.get("PAPERSPLEASE_MAILTO", "")
         settings.openalex_key = os.environ.get("PAPERSPLEASE_OPENALEX_KEY", "")
@@ -83,10 +83,12 @@ class Settings:
         settings.llm_model = os.environ.get("PAPERSPLEASE_LLM_MODEL", settings.llm_model)
         if os.environ.get("PAPERSPLEASE_LLM_JSON") in {"0", "false", "no"}:
             settings.llm_json_mode = False
+        from . import __version__
+
         contact = settings.mailto or settings.unpaywall_email or "anonymous"
         settings.user_agent = os.environ.get(
             "PAPERSPLEASE_USER_AGENT",
-            f"papersplease/0.4 (+https://github.com/thijnperd/Sci-crawler; mailto:{contact})",
+            f"papersplease/{__version__} (+https://github.com/thijnperd/Sci-crawler; mailto:{contact})",
         )
         return settings
 

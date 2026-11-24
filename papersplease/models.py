@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field, asdict
-from typing import Any, Iterable
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass, field
+from typing import Any
 
-_DOI_PREFIX = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.I)
+_DOI_PREFIX = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
 
 
 def norm_doi(value: str | None) -> str | None:
@@ -27,6 +28,13 @@ def title_key(title: str | None) -> str:
         return ""
     key = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
     return key[:110]
+
+
+def _is_preprint(paper: Paper) -> bool:
+    kind = (paper.type or "").strip().lower().replace("_", "-")
+    if "preprint" in kind or kind == "posted-content":
+        return True
+    return bool(paper.arxiv_id and not paper.journal)
 
 
 @dataclass
@@ -71,8 +79,10 @@ class Paper:
             return ", ".join(self.authors)
         return ", ".join(self.authors[:limit]) + " et al."
 
-    def merge(self, other: "Paper") -> None:
+    def merge(self, other: Paper) -> None:
         """Absorb a duplicate record, keeping the richest field of each."""
+        self_pre = _is_preprint(self)
+        other_pre = _is_preprint(other)
         if other.doi and not self.doi:
             self.doi = other.doi
         if other.title and len(other.title) > len(self.title or ""):
@@ -80,10 +90,17 @@ class Paper:
         for name in ("pmid", "pmcid", "arxiv_id", "journal", "url", "type"):
             if not getattr(self, name) and getattr(other, name):
                 setattr(self, name, getattr(other, name))
+        if self_pre and not other_pre:
+            if other.type:
+                self.type = other.type
+            if other.journal:
+                self.journal = other.journal
+            if other.year:
+                self.year = other.year
+        elif other.year and (self.year is None or (other.year < self.year and not (other_pre and not self_pre))):
+            self.year = other.year
         if other.abstract and len(other.abstract) > len(self.abstract or ""):
             self.abstract = other.abstract
-        if other.year and (self.year is None or other.year < self.year):
-            self.year = other.year
         self.cited_by = max(self.cited_by, other.cited_by)
         self.is_oa = self.is_oa or other.is_oa
         self.oa_url = self.oa_url or other.oa_url

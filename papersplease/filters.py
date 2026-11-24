@@ -13,7 +13,8 @@ CLI tools that expose this filter do.
 
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+import re
+from collections.abc import Iterable, Sequence
 
 from .models import Paper
 
@@ -66,6 +67,17 @@ def paper_type(paper: Paper) -> str:
     return kind or "other"
 
 
+def _boundary_hit(needle: str, haystack: str) -> bool:
+    """Word-boundary match so `--author Li` does not keep `Lindqvist`."""
+    parts = [re.escape(part) for part in needle.split()]
+    if not parts:
+        return False
+    pattern = r"\s+".join(parts)
+    prefix = r"(?<!\w)" if (needle[0].isalnum() or needle[0] == "_") else ""
+    suffix = r"(?!\w)" if (needle[-1].isalnum() or needle[-1] == "_") else ""
+    return bool(re.search(f"{prefix}{pattern}{suffix}", haystack, re.IGNORECASE))
+
+
 def keep(
     paper: Paper,
     *,
@@ -77,16 +89,18 @@ def keep(
     preprints_only: bool = False,
 ) -> bool:
     """True when a paper satisfies every requested filter."""
-    wanted_authors = [a.strip().lower() for a in authors if a and a.strip()]
-    if wanted_authors:
-        haystack = " ".join(paper.authors).lower()
-        if not any(name in haystack for name in wanted_authors):
-            return False
+    wanted_authors = [a.strip() for a in authors if a and a.strip()]
+    if wanted_authors and not any(
+        _boundary_hit(name, author)
+        for author in paper.authors
+        for name in wanted_authors
+    ):
+        return False
 
-    wanted_venues = [v.strip().lower() for v in venues if v and v.strip()]
+    wanted_venues = [v.strip() for v in venues if v and v.strip()]
     if wanted_venues:
-        venue = (paper.journal or "").lower()
-        if not any(name in venue for name in wanted_venues):
+        venue = paper.journal or ""
+        if not any(_boundary_hit(name, venue) for name in wanted_venues):
             return False
 
     if min_citations is not None and paper.cited_by < min_citations:
@@ -98,9 +112,7 @@ def keep(
         allowed.update({"journal", "conference", "book"})
     if preprints_only:
         allowed.add("preprint")
-    if allowed and paper_type(paper) not in allowed:
-        return False
-    return True
+    return not (allowed and paper_type(paper) not in allowed)
 
 
 def apply(papers: Sequence[Paper], **criteria) -> list[Paper]:

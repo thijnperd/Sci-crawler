@@ -8,7 +8,6 @@ from papersplease.config import Settings
 from papersplease.models import Paper
 from papersplease.net import Blocked, FetchError
 
-
 SETTINGS = Settings(
     cache=False,
     mirrors=["https://sci-hub.se", "https://sci-hub.st"],
@@ -179,7 +178,8 @@ class DownloadTests(unittest.TestCase):
         self.assertIn("not a PDF", note)
 
     def test_pdf_is_written(self):
-        import tempfile, os
+        import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             target = os.path.join(tmp, "x.pdf")

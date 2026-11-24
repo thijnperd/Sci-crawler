@@ -10,8 +10,9 @@ that only clears the "muscle" facet fails "muscle + strength + older + adults".
 from __future__ import annotations
 
 import datetime as _dt
+import math
 import re
-from typing import Iterable
+from collections.abc import Iterable
 
 from .models import Facet, Relation, ScopeSpec
 from .normalize import normalize_intent
@@ -34,8 +35,8 @@ STOPWORDS = {
     "but", "however", "whereas", "although", "though", "yet", "rather",
     "instead", "just", "merely", "only", "also", "plus", "either",
     "neither", "regarding", "concerning", "related", "versus", "vs",
-    "not", "no", "nor", "excluding", "exclude", "except", "without",
-    "unrelated", "anything", "cannot", "can't", "don't", "doesn't", "didn't",
+    "not", "no", "nor", "excluding", "exclude", "except", "unrelated",
+    "anything", "cannot", "can't", "don't", "doesn't", "didn't",
     "isn't", "aren't", "wasn't", "weren't", "won't", "wouldn't", "shouldn't",
     "couldn't", "significant", "significantly",
     # Filler that carries no subject: "optimal rep count" is about reps, not
@@ -69,7 +70,7 @@ GENERIC = {
     "humans", "patient", "patients", "participant", "participants", "subject",
     "subjects", "people", "persons", "individual", "individuals", "mechanism",
     "mechanisms", "method", "methods", "approach", "approaches", "new",
-    "novel", "review", "overview", "update", "commentary", "perspective",
+    "novel", "overview", "update", "commentary", "perspective",
 }
 
 # A small, conservative thesaurus. It exists so that "elderly" satisfies
@@ -165,21 +166,21 @@ _QUOTED_PHRASE_RE = re.compile(r'"([^"]{2,80})"')
 _TYPE_PHRASE_RE = re.compile(
     r"\b(?:([a-z][a-z0-9-]+)\s+type\s+(1|2|3|4|i|ii|iii|iv)|"
     r"type\s+(1|2|3|4|i|ii|iii|iv)\s+([a-z][a-z0-9-]+))\b",
-    re.I,
+    re.IGNORECASE,
 )
 
 # "18 years old" / "18-year-olds" is a population, not a date filter and not
 # two throwaway words; collapse it before the year regexes ever see it.
 _AGE_RE = re.compile(
-    r"\b(1[2-9]|[2-3]\d)\s*(?:-|\s)?\s*(?:year|yr)s?[\s-]*old\b", re.I
+    r"\b(1[2-9]|[2-3]\d)\s*(?:-|\s)?\s*(?:year|yr)s?[\s-]*old\b", re.IGNORECASE
 )
 
 _YEAR = r"(?:19|20)\d{2}"
 _RANGE_RE = re.compile(rf"\b({_YEAR})\s*(?:-|–|to|until|through)\s*({_YEAR})\b")
 _SINCE_RE = re.compile(rf"\b(?:since|after|from|post|newer than|published after)\s*({_YEAR})\b")
 _UNTIL_RE = re.compile(rf"\b(?:before|until|pre|older than|published before)\s*({_YEAR})\b")
-_LAST_RE = re.compile(r"\b(?:last|past|recent)\s+(\d{1,2})\s+years?\b", re.I)
-_DECADE_RE = re.compile(r"\b(?:last|past)\s+decade\b", re.I)
+_LAST_RE = re.compile(r"\b(?:last|past|recent)\s+(\d{1,2})\s+years?\b", re.IGNORECASE)
+_DECADE_RE = re.compile(r"\b(?:last|past)\s+decade\b", re.IGNORECASE)
 _IN_PAREN_RE = re.compile(rf"\(({_YEAR})\s*[-–]\s*({_YEAR})\)")
 # Negation cues. Longest-first matching is essential: "not about" must win over
 # "not", and "but not" must consume the "but" instead of leaving it behind as a
@@ -213,7 +214,7 @@ _CUE_RE = re.compile(
     r"(?<![a-z0-9])(?P<cue>"
     + "|".join(re.escape(cue) for cue in sorted(_CUE_KINDS, key=len, reverse=True))
     + r")(?![a-z0-9])",
-    re.I,
+    re.IGNORECASE,
 )
 
 # An excluded concept is a noun phrase, not the rest of the sentence. Stopping at
@@ -225,11 +226,11 @@ _EXCLUDE_STOP = re.compile(
     r"|\s+(?:in|among|amongst|for|with|without|during|after|before|between|from|"
     r"across|within|at|on|to|via|using|than|that|which|whose|when|where|"
     r"versus|vs|compared)\s+",
-    re.I,
+    re.IGNORECASE,
 )
-_TERM_SPLIT = re.compile(r"\s*(?:,|;|/|&|\+|\band\b|\bor\b)\s*", re.I)
+_TERM_SPLIT = re.compile(r"\s*(?:,|;|/|&|\+|\band\b|\bor\b)\s*", re.IGNORECASE)
 # "no rodents" is a negation; "amino acid" and "no significant difference" are not.
-_NO_RE = re.compile(r"(?<![a-z0-9])no\s+(?P<piece>[a-z0-9][^,;:.!?()]*)", re.I)
+_NO_RE = re.compile(r"(?<![a-z0-9])no\s+(?P<piece>[a-z0-9][^,;:.!?()]*)", re.IGNORECASE)
 _NO_FALSE_FRIENDS = {
     "longer", "more", "less", "fewer", "significant", "effect", "effects",
     "difference", "differences", "association", "evidence", "increase",
@@ -412,7 +413,7 @@ def _extract_negations(text: str) -> tuple[str, list[str], list[str]]:
             # "but not just about muscles" is contrastive: the leftmost cue is
             # "but not", but the phrase means "not merely".
             softened = re.match(
-                r"(?:just|only|merely)\s+(?:about\s+)?", text[start:], re.I
+                r"(?:just|only|merely)\s+(?:about\s+)?", text[start:], re.IGNORECASE
             )
             if softened:
                 kind = "contrast"
@@ -426,7 +427,7 @@ def _extract_negations(text: str) -> tuple[str, list[str], list[str]]:
                 r"\s*,?\s*(?:but|rather|instead)\s+"
                 r"(?:about\s+|on\s+|of\s+|regarding\s+|concerning\s+|in\s+)?",
                 text[end:],
-                re.I,
+                re.IGNORECASE,
             )
             if connector:
                 end += connector.end()
@@ -588,7 +589,7 @@ _RELATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(
             r"(?:^|\b)(?:the\s+)?(?P<cue>influence|effect|effects|impact|impacts|role|consequence|consequences|contribution)\s+"
             r"of\s+(?P<src>.+?)\s+(?:on|upon|for|toward|towards)\s+(?P<dst>.+)$",
-            re.I,
+            re.IGNORECASE,
         ),
     ),
     (
@@ -598,14 +599,14 @@ _RELATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"(?P<cue>affect|affects|influence|influences|impact|impacts|cause|causes|"
             r"change|changes|improve|improves|worsen|worsens|trigger|triggers|prevent|prevents)\s+"
             r"(?P<dst>.+)$",
-            re.I,
+            re.IGNORECASE,
         ),
     ),
     (
         "forward",
         re.compile(
             r"^(?P<dst>.+?)\s+(?P<cue>caused\s+by|induced\s+by|triggered\s+by|due\s+to|resulting\s+from)\s+(?P<src>.+)$",
-            re.I,
+            re.IGNORECASE,
         ),
     ),
     (
@@ -616,7 +617,7 @@ _RELATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"prevents?|preventing|improves?|improving|worsens?|worsening|promotes?|promoting|"
             r"affects?|affecting|influences?|influencing|impacts?|impacting|predicts?|predicting)\s+"
             r"(?P<dst>.+)$",
-            re.I,
+            re.IGNORECASE,
         ),
     ),
 )
@@ -624,7 +625,7 @@ _RELATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _POP_TAIL_RE = re.compile(
     r"\s+(?:in|among|amongst)\s+(?:young|younger|older|elderly|adult|adults|"
     r"children|adolescents|youth|men|women|patients|people|humans|participants|subjects)\b.*$",
-    re.I,
+    re.IGNORECASE,
 )
 
 
@@ -737,6 +738,8 @@ def parse_intent(
     intent = " ".join((text or "").split())
     if not intent:
         raise ValueError("intent must not be empty")
+    if not math.isfinite(min_scope) or not (0.0 <= min_scope <= 1.0):
+        raise ValueError("min_scope must be between 0.0 and 1.0")
 
     spec = ScopeSpec(intent=intent, min_scope=min_scope)
     # A question written in Dutch, or in gym shorthand, is translated into the
@@ -934,7 +937,7 @@ def parse_intent(
         if len(pool) < 2:
             pool = [f for f in facets if f.name not in POPULATION_GROUPS]
         top = max((f.weight for f in pool), default=0.0)
-        spec.anchors = [f.name for f in pool if f.weight >= top and top > 0][:4]
+        spec.anchors = [f.name for f in pool if f.weight >= top > 0][:4]
         spec.extra_notes.append(
             "the intent lists several concepts rather than one head noun; "
             f"anchors: {', '.join(spec.anchors) or '(none)'}"

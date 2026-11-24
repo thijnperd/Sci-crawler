@@ -15,16 +15,19 @@ Two passes:
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import re
-from typing import Any, Iterable, Sequence
+from collections.abc import Iterable, Sequence
+from typing import Any
 
 from .config import Settings
 from .intent import exclusion_terms, variants
 from .models import Paper, ScopeSpec, Verdict
 from .net import FetchError, fetch
 
+_HYPHENS = re.compile(r"[-\u2010-\u2015\u2212]+")
 _NON_WORD = re.compile(r"[^a-z0-9 ]+")
 _SPACES = re.compile(r"\s+")
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?;])\s+")
@@ -34,11 +37,13 @@ def normalize(text: str | None) -> str:
     """Lowercase, strip punctuation/hyphens, collapse whitespace."""
     if not text:
         return ""
-    text = text.lower().replace("-", " ").replace("‐", " ").replace("’", "'")
+    text = text.lower().replace("\u2019", "'").replace("\u2018", "'")
+    text = _HYPHENS.sub(" ", text)
     text = _NON_WORD.sub(" ", text)
     return _SPACES.sub(" ", text).strip()
 
 
+@functools.lru_cache(maxsize=2048)
 def _pattern(term: str) -> re.Pattern[str]:
     words = [re.escape(w) for w in normalize(term).split()]
     if not words:
@@ -193,9 +198,8 @@ def _check_direction(
     fwd_sentence = ""
     rev_hits = 0
     for raw_s, norm_s in sentence_pairs[1:]:
-        if _matches(fwd_patterns, norm_s):
-            if not fwd_sentence:
-                fwd_sentence = raw_s
+        if _matches(fwd_patterns, norm_s) and not fwd_sentence:
+            fwd_sentence = raw_s
         if _matches(rev_patterns, norm_s):
             rev_hits += 1
 
@@ -249,7 +253,6 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
         for item in raw_sentences
         if item and item.strip()
     ]
-    sentences = [norm for _, norm in sentence_pairs]
 
     total_weight = sum(f.weight for f in spec.facets) or 1.0
     matched_weight = 0.0
@@ -310,7 +313,7 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
     )
 
     # Explicit exclusions and date filters are hard disqualifiers.
-    haystack = " ".join((title, keywords, body))
+    haystack = f"{title} {keywords} {body}"
     head_terms = spec.head.terms if spec.head else []
     head_present = not head_terms or any(
         _hit(_pattern(term), haystack) for term in head_terms
@@ -635,6 +638,10 @@ def combine(verdict: Verdict, llm: dict[str, Any] | None) -> Verdict:
 def rank(papers: Iterable[Paper], verdicts: Sequence[Verdict]) -> list[tuple[Paper, Verdict]]:
     """Order screened papers: bucket (in_scope -> adjacent -> rejected), then score, citations, recency."""
     papers = list(papers)
+    if len(papers) != len(verdicts):
+        raise ValueError(
+            f"rank() length mismatch: {len(papers)} papers != {len(verdicts)} verdicts"
+        )
     pairs = list(zip(papers, verdicts))
     ceiling = max((p.cited_by for p in papers), default=0)
     years = [p.year for p in papers if p.year]

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "papersplease"
-version = "0.5.0"
+version = "0.6.0"
 description = "An agent-native literature crawler: searches, reads, screens each paper for scope, then hands back Sci-Hub links."
 readme = "README.md"
 requires-python = ">=3.10"

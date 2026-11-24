@@ -13,7 +13,7 @@ import datetime as _dt
 import re
 from typing import Iterable
 
-from .models import Facet, ScopeSpec
+from .models import Facet, Relation, ScopeSpec
 from .normalize import normalize_intent
 
 # Words carrying no topical information. Removed outright.
@@ -61,7 +61,8 @@ POPULATION_GROUPS = {"adult", "child", "young adults", "older"}
 
 GENERIC = {
     "effect", "effects", "affect", "role", "roles", "relationship", "relation",
-    "association", "associations", "impact", "impacts", "influence",
+    "association", "associations", "impact", "impacts", "influence", "influences",
+    "consequence", "consequences", "contribution", "contributions",
     "comparison", "difference", "differences", "change", "changes", "outcome",
     "outcomes", "analysis", "review", "reviews", "meta", "systematic",
     "randomized", "randomised", "controlled", "trial", "trials", "human",
@@ -114,6 +115,29 @@ _THESAURUS_GROUPS: tuple[tuple[str, ...], ...] = (
     ("young adults", "young adult", "younger adults", "younger adult",
      "young men", "young women", "younger men", "younger women",
      "college students", "university students", "18-25", "18-30"),
+    ("type 1 diabetes", "diabetes type 1", "type 1 diabetes mellitus", "type i diabetes",
+     "t1d", "t1dm", "insulin-dependent diabetes", "insulin dependent diabetes",
+     "iddm", "juvenile diabetes"),
+    ("type 2 diabetes", "diabetes type 2", "type 2 diabetes mellitus", "type ii diabetes",
+     "t2d", "t2dm", "non-insulin-dependent diabetes", "adult-onset diabetes"),
+    ("diabetes", "diabetes mellitus", "diabetic", "hyperglycemia", "hyperglycaemia"),
+    ("unhealthy diet", "poor diet", "western diet", "ultra-processed food",
+     "bad diet", "high-sugar diet", "high-fat diet", "suboptimal diet",
+     "poor diet quality", "low diet quality", "low dietary quality",
+     "ultra-processed foods", "ultraprocessed food", "junk food", "fast food",
+     "sugar-sweetened beverages", "processed food", "processed foods",
+     "poor nutrition", "unhealthy eating"),
+    ("diet", "diets", "dietary", "dietary intake", "dietary pattern",
+     "dietary patterns", "diet quality", "dietary quality", "nutrition",
+     "nutritional", "eating habits", "food intake"),
+    ("insulin resistance", "insulin sensitivity", "glycemic control",
+     "glycaemic control", "hba1c", "blood glucose"),
+    ("obesity", "obese", "overweight", "adiposity", "body mass index", "bmi"),
+    ("cardiovascular", "cardiovascular disease", "heart disease",
+     "coronary heart disease", "coronary artery disease", "cvd"),
+    ("hypertension", "high blood pressure", "blood pressure"),
+    ("depression", "depressive", "depressive symptoms", "major depressive disorder"),
+    ("anxiety", "anxious", "anxiety disorder"),
 )
 
 _SYNONYM_INDEX: dict[str, tuple[str, ...]] = {}
@@ -125,6 +149,23 @@ _PHRASES = sorted(
     (p for group in _THESAURUS_GROUPS for p in group if " " in p),
     key=len,
     reverse=True,
+)
+
+
+def _phrase_regex(phrase: str) -> re.Pattern[str]:
+    parts = [re.escape(p) for p in re.split(r"[-\s]+", phrase.strip()) if p]
+    return re.compile(r"(?<![a-z0-9])" + r"[-\s]+".join(parts) + r"(?![a-z0-9])")
+
+
+_PHRASE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    (phrase, _phrase_regex(phrase)) for phrase in _PHRASES
+]
+
+_QUOTED_PHRASE_RE = re.compile(r'"([^"]{2,80})"')
+_TYPE_PHRASE_RE = re.compile(
+    r"\b(?:([a-z][a-z0-9-]+)\s+type\s+(1|2|3|4|i|ii|iii|iv)|"
+    r"type\s+(1|2|3|4|i|ii|iii|iv)\s+([a-z][a-z0-9-]+))\b",
+    re.I,
 )
 
 # "18 years old" / "18-year-olds" is a population, not a date filter and not
@@ -208,28 +249,40 @@ _CORE_BOUNDARY = {
 }
 
 
+_INVARIANT_S = {
+    "diabetes", "species", "series", "caries", "herpes", "measles",
+    "shingles", "rabies", "rickets", "mumps", "stress", "fitness",
+    "illness", "wellness",
+}
+
 _NON_PLURAL_ADJECTIVES = {
     "younger", "older", "lower", "higher", "greater", "smaller", "larger",
     "better", "worse", "faster", "slower", "stronger", "weaker", "heavier",
     "lighter", "shorter", "longer", "wider", "narrower", "deeper",
+    "bad", "poor", "good", "unhealthy", "healthy", "high", "low",
+    "chronic", "acute", "severe", "mild", "dietary", "western",
+    "metabolic", "cardiac", "skeletal", "muscular", "glycemic",
+    "glycaemic", "processed", "ultraprocessed", "suboptimal",
 }
 
 
 def _variants(token: str) -> list[str]:
     """Cheap, predictable morphological variants (plurals, -ing, -ed)."""
     out = {token}
-    if token.endswith("ies") and len(token) > 4:
-        out.add(token[:-3] + "y")
-    elif token.endswith("es") and len(token) > 4:
-        stem = token[:-2]
-        # "boxes" -> "box", but "muscles" -> "muscle" (never "muscl").
-        out.add(stem if stem.endswith(("s", "x", "z", "ch", "sh")) else token[:-1])
-    elif (
-        token.endswith("s")
-        and not token.endswith(("ss", "us", "is"))
-        and len(token) > 3
-    ):
-        out.add(token[:-1])
+    invariant_s = token in _INVARIANT_S or token.endswith(("sis", "itis", "osis", "iasis"))
+    if not invariant_s:
+        if token.endswith("ies") and len(token) > 4:
+            out.add(token[:-3] + "y")
+        elif token.endswith("es") and len(token) > 4:
+            stem = token[:-2]
+            # "boxes" -> "box", but "muscles" -> "muscle" (never "muscl").
+            out.add(stem if stem.endswith(("s", "x", "z", "ch", "sh")) else token[:-1])
+        elif (
+            token.endswith("s")
+            and not token.endswith(("ss", "us", "is"))
+            and len(token) > 3
+        ):
+            out.add(token[:-1])
     if token.endswith("ing") and len(token) > 5:
         base = token[:-3]
         out.add(base)
@@ -247,7 +300,7 @@ def _variants(token: str) -> list[str]:
             out.add(plural)
         elif token == plural:
             out.add(singular)
-    if token.endswith("y") and len(token) > 3:
+    if token.endswith("y") and len(token) > 3 and token not in _NON_PLURAL_ADJECTIVES:
         out.add(token[:-1] + "ies")
     if not token.endswith(("s", "y")) and token not in _NON_PLURAL_ADJECTIVES:
         out.add(token + "s")
@@ -481,9 +534,9 @@ def _core_facets(working: str) -> tuple[list[Facet], bool]:
     joined = " ".join(raw)
     facets: list[Facet] = []
     consumed: set[str] = set()
-    for phrase in _PHRASES:
-        if phrase in joined:
-            words = set(phrase.split())
+    for phrase, pat in _PHRASE_PATTERNS:
+        if pat.search(joined):
+            words = set(re.split(r"[-\s]+", phrase))
             if words & consumed:
                 continue
             facets.append(
@@ -512,6 +565,157 @@ def _facet_for(token: str) -> Facet | None:
         return Facet(name=group[0], terms=sorted(terms), weight=weight, canonical=list(group))
     weight = 0.5 if token in GENERIC else 1.0
     return Facet(name=token, terms=_variants(token), weight=weight)
+
+
+_STRUCTURAL_CUE_ROOTS = {
+    "influence": "influence",
+    "influences": "influence",
+    "effect": "effect",
+    "effects": "effect",
+    "impact": "impact",
+    "impacts": "impact",
+    "role": "role",
+    "roles": "role",
+    "consequence": "consequence",
+    "consequences": "consequence",
+    "contribution": "contribution",
+    "contributions": "contribution",
+}
+
+_RELATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "forward",
+        re.compile(
+            r"(?:^|\b)(?:the\s+)?(?P<cue>influence|effect|effects|impact|impacts|role|consequence|consequences|contribution)\s+"
+            r"of\s+(?P<src>.+?)\s+(?:on|upon|for|toward|towards)\s+(?P<dst>.+)$",
+            re.I,
+        ),
+    ),
+    (
+        "forward",
+        re.compile(
+            r"\bhow\s+(?:does|do|can|could|may|might)?\s*(?P<src>.+?)\s+"
+            r"(?P<cue>affect|affects|influence|influences|impact|impacts|cause|causes|"
+            r"change|changes|improve|improves|worsen|worsens|trigger|triggers|prevent|prevents)\s+"
+            r"(?P<dst>.+)$",
+            re.I,
+        ),
+    ),
+    (
+        "forward",
+        re.compile(
+            r"^(?P<dst>.+?)\s+(?P<cue>caused\s+by|induced\s+by|triggered\s+by|due\s+to|resulting\s+from)\s+(?P<src>.+)$",
+            re.I,
+        ),
+    ),
+    (
+        "forward",
+        re.compile(
+            r"^(?P<src>.+?)\s+(?P<cue>causes?|causing|leads?\s+to|leading\s+to|induces?|inducing|"
+            r"triggers?|triggering|increases?\s+(?:the\s+)?risk\s+of|reduces?\s+(?:the\s+)?risk\s+of|"
+            r"prevents?|preventing|improves?|improving|worsens?|worsening|promotes?|promoting|"
+            r"affects?|affecting|influences?|influencing|impacts?|impacting|predicts?|predicting)\s+"
+            r"(?P<dst>.+)$",
+            re.I,
+        ),
+    ),
+)
+
+_POP_TAIL_RE = re.compile(
+    r"\s+(?:in|among|amongst)\s+(?:young|younger|older|elderly|adult|adults|"
+    r"children|adolescents|youth|men|women|patients|people|humans|participants|subjects)\b.*$",
+    re.I,
+)
+
+
+def _clause_facets(clause: str, facets: list[Facet], skip: set[str]) -> list[str]:
+    lower_c = clause.lower()
+    hits: list[tuple[int, str]] = []
+    for facet in facets:
+        if facet.name in skip or facet.name in POPULATION_GROUPS or facet.name in GENERIC:
+            continue
+        candidates = [facet.name] + list(facet.canonical) + list(facet.terms)
+        best_pos: int | None = None
+        for term in candidates:
+            if not term:
+                continue
+            match = _phrase_regex(term).search(lower_c)
+            if match and (best_pos is None or match.start() < best_pos):
+                best_pos = match.start()
+        if best_pos is not None:
+            hits.append((best_pos, facet.name))
+    hits.sort(key=lambda pair: pair[0])
+    return [name for _, name in hits]
+
+
+def _extract_relation(positive: str, facets: list[Facet]) -> tuple[Relation | None, set[str]]:
+    """Detect causal / directional phrasing (X -> Y) in the positive intent."""
+    cleaned = " ".join((positive or "").split())
+    if not cleaned:
+        return None, set()
+    for _, pat in _RELATION_PATTERNS:
+        match = pat.search(cleaned)
+        if not match:
+            continue
+        cue = " ".join(match.group("cue").lower().split())
+        src_text = match.group("src").strip()
+        dst_text = match.group("dst").strip()
+        trimmed_dst = _POP_TAIL_RE.sub("", dst_text).strip()
+        cue_root = _STRUCTURAL_CUE_ROOTS.get(cue)
+        skip = {cue_root} if cue_root else set()
+
+        source_names = _clause_facets(src_text, facets, skip)
+        target_names = _clause_facets(trimmed_dst or dst_text, facets, skip)
+        if not target_names and trimmed_dst:
+            target_names = _clause_facets(dst_text, facets, skip)
+        target_names = [n for n in target_names if n not in source_names]
+        if source_names and target_names:
+            return (
+                Relation(kind="causal", source=source_names, target=target_names, cue=cue),
+                skip,
+            )
+    return None, set()
+
+
+_HYPERTROPHY_ORGAN_CUES = (
+    "cardiac", "ventricular", "heart", "myocardial", "atrial",
+    "prostate", "prostatic", "adenoid", "tonsil", "turbinate",
+    "keloid", "scar", "gingival",
+)
+
+
+def _infer_sense_excludes(facets: list[Facet], intent_lower: str) -> list[tuple[str, str]]:
+    """Disambiguate polysemous concepts using the surrounding intent context."""
+    facet_names = {f.name for f in facets}
+    if "hypertrophy" not in facet_names:
+        return []
+    muscle_cues = {
+        "muscle", "resistance training", "exercise", "strength",
+        "volume", "repetition", "frequency", "program", "intensity",
+    }
+    has_muscle_context = bool(muscle_cues & facet_names) or any(
+        re.search(rf"\b{re.escape(w)}\b", intent_lower)
+        for w in ("muscle", "gym", "training", "bodybuilding", "lifting")
+    )
+    has_organ_context = any(
+        re.search(rf"\b{re.escape(w)}\b", intent_lower)
+        for w in _HYPERTROPHY_ORGAN_CUES
+    )
+    if not has_muscle_context or has_organ_context:
+        return []
+    return [
+        ("left ventricular hypertrophy", "cardiac hypertrophy"),
+        ("right ventricular hypertrophy", "cardiac hypertrophy"),
+        ("ventricular hypertrophy", "cardiac hypertrophy"),
+        ("cardiac hypertrophy", "cardiac hypertrophy"),
+        ("myocardial hypertrophy", "cardiac hypertrophy"),
+        ("hypertrophic cardiomyopathy", "cardiac hypertrophy"),
+        ("prostatic hypertrophy", "prostatic hypertrophy"),
+        ("benign prostatic", "prostatic hypertrophy"),
+        ("adenoid hypertrophy", "adenoid hypertrophy"),
+        ("tonsillar hypertrophy", "tonsillar hypertrophy"),
+        ("turbinate hypertrophy", "turbinate hypertrophy"),
+    ]
 
 
 # Above this, one abstract can no longer plausibly cover the intent and
@@ -556,24 +760,76 @@ def parse_intent(
     positive = working
     spec.search_text = " ".join(positive.split())
     lowered = working.lower()
-    phrase_facets: list[Facet] = []
-    for phrase in _PHRASES:
-        if phrase in lowered:
-            group = _SYNONYM_INDEX[phrase]
-            terms: set[str] = set()
-            for word in group:
-                terms.update(_variants(word))
+    phrase_facets: list[tuple[int, Facet]] = []
+    seen_names: set[str] = set()
+
+    # 1. Explicit user-quoted phrases (e.g. '"blood pressure" in adults').
+    for match in list(_QUOTED_PHRASE_RE.finditer(lowered)):
+        phrase_clean = " ".join(match.group(1).lower().split())
+        if len(phrase_clean) >= 2 and phrase_clean not in seen_names:
+            terms = [phrase_clean] if " " in phrase_clean else _variants(phrase_clean)
             phrase_facets.append(
-                Facet(name=group[0], terms=sorted(terms),
-                      weight=0.6 if group[0] in GENERIC_GROUPS else 1.2,
-                      phrases=[p for p in group if " " in p],
-                      canonical=list(group))
+                (
+                    match.start(),
+                    Facet(
+                        name=phrase_clean,
+                        terms=terms,
+                        weight=1.2,
+                        phrases=[phrase_clean] if " " in phrase_clean else [],
+                        canonical=[phrase_clean],
+                    ),
+                )
             )
-            lowered = lowered.replace(phrase, " ")
+            seen_names.add(phrase_clean)
+        lowered = lowered.replace(match.group(0), " ", 1)
+
+    # 2. Curated thesaurus phrases (longest-first, word-boundary safe).
+    for phrase, pat in _PHRASE_PATTERNS:
+        found = pat.search(lowered)
+        if found:
+            group = _SYNONYM_INDEX[phrase]
+            if group[0] not in seen_names:
+                terms_set: set[str] = set()
+                for word in group:
+                    terms_set.update(_variants(word))
+                phrase_facets.append(
+                    (
+                        found.start(),
+                        Facet(
+                            name=group[0],
+                            terms=sorted(terms_set),
+                            weight=0.6 if group[0] in GENERIC_GROUPS else 1.2,
+                            phrases=[p for p in group if " " in p],
+                            canonical=list(group),
+                        ),
+                    )
+                )
+                seen_names.add(group[0])
+            lowered = pat.sub(" ", lowered)
+
+    # 3. Arbitrary "<noun> type <1|2|i|ii>" or "type <1|2|i|ii> <noun>" patterns.
+    for match in list(_TYPE_PHRASE_RE.finditer(lowered)):
+        phrase_clean = " ".join(match.group(0).lower().split())
+        if phrase_clean not in seen_names:
+            phrase_facets.append(
+                (
+                    match.start(),
+                    Facet(
+                        name=phrase_clean,
+                        terms=[phrase_clean],
+                        weight=1.2,
+                        phrases=[phrase_clean],
+                        canonical=[phrase_clean],
+                    ),
+                )
+            )
+            seen_names.add(phrase_clean)
+        lowered = lowered.replace(match.group(0), " ", 1)
+
+    phrase_facets.sort(key=lambda pair: pair[0])
     working = lowered
 
-    facets: list[Facet] = list(phrase_facets)
-    seen_names = {f.name for f in facets}
+    facets: list[Facet] = [f for _, f in phrase_facets]
     seen_sets = {tuple(f.terms) for f in facets}
 
     for token in _TOKEN_RE.findall(working.replace("-", " ")):
@@ -588,12 +844,35 @@ def parse_intent(
         seen_sets.add(tuple(facet.terms))
         facets.append(facet)
 
+    def _pos(facet: Facet) -> int:
+        pos_lower = positive.lower()
+        for term in [facet.name] + list(facet.canonical):
+            m = _phrase_regex(term).search(pos_lower)
+            if m:
+                return m.start()
+        return len(pos_lower)
+
+    facets.sort(key=_pos)
+
+    # Detect causal / directional relationships and drop structural cue words
+    # (like "influence", "effect") when they merely introduce X -> Y.
+    relation, drop_cues = _extract_relation(positive, facets)
+    if relation is not None:
+        remaining = [f for f in facets if f.name not in drop_cues]
+        if len(remaining) >= 2:
+            facets = remaining
+        spec.relation = relation
+        spec.extra_notes.append(
+            f"direction: {', '.join(relation.source)} -> {', '.join(relation.target)}"
+        )
+
     # Explicitly required concepts are always facets, whatever the wording.
     field = (require_in or "").strip().lower()
     if field not in {"", "title", "abstract", "title_or_abstract"}:
         raise ValueError("require_in must be title, abstract or title_or_abstract")
     spec.require_field = field
     required_terms = [term.strip().lower() for term in require if term.strip()]
+    seen_names = {f.name for f in facets}
     for term in required_terms:
         facet = _facet_for(term)
         if facet and facet.name not in seen_names:
@@ -614,15 +893,8 @@ def parse_intent(
         facets = [Facet(name=t, terms=_variants(t), weight=1.0) for t in fallback[:6]]
 
     if len(facets) > MAX_FACETS:
-        def position(facet: Facet) -> int:
-            for term in [facet.name] + list(facet.canonical):
-                index = positive.lower().find(term.lower())
-                if index >= 0:
-                    return index
-            return len(positive)
-
         keep = sorted(
-            sorted(range(len(facets)), key=lambda i: (-facets[i].weight, position(facets[i]), i))[
+            sorted(range(len(facets)), key=lambda i: (-facets[i].weight, _pos(facets[i]), i))[
                 :MAX_FACETS
             ]
         )
@@ -634,6 +906,11 @@ def parse_intent(
         )
 
     spec.facets = facets
+    spec.sense_excludes = _infer_sense_excludes(facets, intent.lower())
+    if spec.sense_excludes:
+        spec.extra_notes.append(
+            "disambiguated hypertrophy to skeletal muscle (excluding cardiac/organ hypertrophy)"
+        )
     # Detect the head from the text *before* multi-word phrases were blanked:
     # otherwise "strength training in older adults" loses its leading phrase and
     # the head silently becomes "adult".

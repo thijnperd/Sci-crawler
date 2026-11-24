@@ -17,7 +17,8 @@ import time
 from dataclasses import dataclass
 from typing import TextIO
 
-_ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+_ANSI = re.compile(r"\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x1b\x07]*(?:\x1b\\|\x07))")
+_ANSI_TOKEN_RE = re.compile(r"(\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x1b\x07]*(?:\x1b\\|\x07)))")
 _CODES = {
     "bold": "\033[1m",
     "dim": "\033[2m",
@@ -319,31 +320,34 @@ class LivePanel:
         return "  ".join(parts)
 
     def render_lines(self, width: int | None = None) -> list[str]:
-        width = width or terminal_width(minimum=64, maximum=96)
-        inner = max(40, width - 4)
+        width = width or max(40, min(96, shutil.get_terminal_size((96, 24)).columns))
+        inner = max(20, width - 4)
         t = self.theme
         elapsed = f"{time.monotonic() - self._started:4.1f}s"
         tl, tr, bl, br, h, v = ("╭", "╮", "╰", "╯", "─", "│") if t.unicode else ("+", "+", "+", "+", "-", "|")
         frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] if t.unicode else ["-", "\\", "|", "/"]
         spin = frames[self._frame % len(frames)]
 
-        head_left = f" {t.paint('PapersPlease', 'bold', 'cyan')} {t.dim(t.sep)} {t.dim(self.title)} "
         head_right = f" {t.dim(elapsed)} "
-        fill_len = max(1, width - 2 - visible_len(head_left) - visible_len(head_right))
-        top = t.dim(tl + h) + head_left + t.dim(h * max(1, fill_len - 1)) + head_right + t.dim(tr)
+        max_left = max(14, width - 4 - visible_len(head_right))
+        title_shown = truncate(self.title, max(4, max_left - 18), unicode=t.unicode)
+        head_left = f" {t.paint('PapersPlease', 'bold', 'cyan')} {t.dim(t.sep)} {t.dim(title_shown)} "
+        if visible_len(head_left) > max_left:
+            head_left = truncate_ansi(head_left, max_left, unicode=t.unicode)
+        fill_len = max(1, width - 3 - visible_len(head_left) - visible_len(head_right))
+        top = t.dim(tl + h) + head_left + t.dim(h * fill_len) + head_right + t.dim(tr)
 
         def box_line(content: str) -> str:
             vis = visible_len(content)
             if vis > inner:
-                # Truncate plain fallback safely
-                content = truncate(_ANSI.sub("", content), inner)
+                content = truncate_ansi(content, inner, unicode=t.unicode)
                 vis = visible_len(content)
             pad = " " * max(0, inner - vis)
             return f"{t.dim(v)} {content}{pad} {t.dim(v)}"
 
         lines = [top]
         if self.subtitle:
-            lines.append(box_line(t.bold(truncate(self.subtitle, inner))))
+            lines.append(box_line(t.bold(truncate(self.subtitle, inner, unicode=t.unicode))))
             lines.append(box_line(""))
 
         label_w = max((len(s["label"]) for s in self._stages), default=12) + 2
@@ -371,6 +375,11 @@ class LivePanel:
 
         lines.append(t.dim(bl + h * (width - 2) + br))
         return lines
+
+    def render_snapshot(self, width: int | None = None) -> list[str]:
+        with self._lock:
+            self._frame += 1
+            return self.render_lines(width=width)
 
     def _draw(self) -> None:
         with self._lock:
@@ -511,14 +520,66 @@ class Theme:
         return self.green("#" * filled) + self.dim("-" * empty)
 
 
-def truncate(text: str, width: int) -> str:
+def truncate(text: str, width: int, *, unicode: bool = True) -> str:
     """Truncate plain text to ``width`` visible cells."""
     text = " ".join(text.split())
     if width <= 0:
         return ""
     if len(text) <= width:
         return text
-    return text[: max(0, width - 1)].rstrip() + ("…" if width > 1 else "")
+    ell = "…" if unicode else "..."
+    if width <= len(ell):
+        return text[:width]
+    return text[: max(0, width - len(ell))].rstrip() + ell
+
+
+def truncate_ansi(text: str, width: int, *, unicode: bool = True) -> str:
+    """Truncate ANSI-styled text to ``width`` visible cells without stripping colour."""
+    if width <= 0:
+        return ""
+    if visible_len(text) <= width:
+        return text
+    ell = "…" if unicode else "..."
+    if width <= len(ell):
+        return _ANSI.sub("", text)[:width]
+    limit = width - len(ell)
+    out: list[str] = []
+    vis = 0
+    sgr_open = False
+    osc_open = False
+    for part in _ANSI_TOKEN_RE.split(text):
+        if not part:
+            continue
+        if _ANSI.fullmatch(part):
+            if part.startswith("\x1b]8;;"):
+                osc_open = part not in ("\x1b]8;;\x1b\\", "\x1b]8;;\x07")
+            elif part.startswith("\x1b[") and part.endswith("m"):
+                sgr_open = part != "\x1b[0m"
+            out.append(part)
+            continue
+        take = limit - vis
+        if take <= 0:
+            break
+        if len(part) <= take:
+            out.append(part)
+            vis += len(part)
+        else:
+            out.append(part[:take].rstrip())
+            vis += take
+            break
+    if osc_open:
+        out.append("\x1b]8;;\x1b\\")
+    if sgr_open:
+        out.append("\x1b[0m")
+    out.append(ell)
+    return "".join(out)
+
+
+def osc8_link(url: str, label: str, enabled: bool) -> str:
+    """Wrap ``label`` in a clickable OSC 8 terminal hyperlink when enabled."""
+    if not enabled or not url:
+        return label
+    return f"\x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\"
 
 
 def wrap(text: str, width: int, *, initial: str = "", subsequent: str | None = None) -> list[str]:
@@ -537,6 +598,17 @@ def wrap(text: str, width: int, *, initial: str = "", subsequent: str | None = N
     current_len = 0
     limit = first_limit
     for word in body.split(" "):
+        while len(word) > limit:
+            if current:
+                lines.append(" ".join(current))
+                current = []
+                current_len = 0
+                limit = rest_limit
+            lines.append(word[:limit])
+            word = word[limit:]
+            limit = rest_limit
+        if not word:
+            continue
         if not current:
             current = [word]
             current_len = len(word)

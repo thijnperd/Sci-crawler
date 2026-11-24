@@ -39,7 +39,9 @@ PapersPlease does four things:
 1. **Search** Europe PMC, Crossref, arXiv, Semantic Scholar and OpenAlex from one sentence.
 2. **Read** titles, abstracts, MeSH keywords, and — with `--deep` — open-access full text.
 3. **Screen** every paper against the intent: facet coverage, a head-concept guard, sentence
-   co-occurrence, exclusions, date filters, and an optional LLM second opinion.
+   co-occurrence, causal direction verification (`X -> Y` vs reversed `Y -> X`), contextual
+   domain sense disambiguation (e.g. skeletal muscle vs cardiac hypertrophy), exclusions, date
+   filters, and an optional LLM second opinion.
 4. **Resolve access**: open access first, then every Sci-Hub mirror with live health, then the
    DOI. `--download` walks those candidates and verifies the `%PDF` bytes before writing a file.
 
@@ -93,8 +95,11 @@ enabled automatically). `NO_COLOR=1` or `PAPERSPLEASE_COLOR=never` disables it,
 During `find`, an in-place live stage panel on **stderr** shows per-source hit counts and stage
 progress without scrolling, then clears cleanly before printing the report.
 
-For an interactive in-place terminal browser (split-pane results, live refinement, one-key PDF
-download, browser open, BibTeX/RIS/Markdown export, mirror health, and offline scope explain),
+For an interactive in-place terminal browser (framed active panes, scrollable detail/abstract/excerpt
+view with `←/→`, `J/K`, and `PgUp/PgDn`, best-match evidence snippets, starring & shortlist via
+`s`/`Space`/`4`, live filter `\`, sort cycling `S`, clipboard copy `c`, search history `↑/↓`,
+inspectable refinement `f`/`reset`, one-key PDF download `d`, browser open `o`,
+BibTeX/RIS/Markdown export `x`, mirror health `m`, and offline scope explain `e`),
 run `papersplease` with no arguments, `papersplease tui`, or `papersplease find "..." -i`.
 
 `--out` writes plain, 96-column text. The same renderer drives `explain`, `check`, `read`,

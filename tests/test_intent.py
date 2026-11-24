@@ -141,6 +141,40 @@ class NegationRuleTests(unittest.TestCase):
         spec = parse_intent("no significant difference in muscle strength in older adults")
         self.assertEqual(spec.exclude, [])
 
+
+class RelationAndSenseTests(unittest.TestCase):
+    def test_bad_diet_and_diabetes_type_1_extracts_causal_relation(self):
+        spec = parse_intent("influence of bad diet on diabetes type 1")
+        names = {f.name for f in spec.facets}
+        self.assertEqual(names, {"unhealthy diet", "type 1 diabetes"})
+        self.assertNotIn("influence", names)
+        self.assertNotIn("bad", names)
+        for facet in spec.facets:
+            self.assertNotIn("diabete", facet.terms)
+            self.assertNotIn("bads", facet.terms)
+        self.assertIsNotNone(spec.relation)
+        self.assertEqual(spec.relation.source, ["unhealthy diet"])
+        self.assertEqual(spec.relation.target, ["type 1 diabetes"])
+
+    def test_hypertrophy_training_infers_cardiac_sense_exclusions(self):
+        spec = parse_intent("optimal training for hypertrophy in younger adults since 2015")
+        excluded_phrases = {term for term, _ in spec.sense_excludes}
+        self.assertIn("left ventricular hypertrophy", excluded_phrases)
+        self.assertIn("cardiac hypertrophy", excluded_phrases)
+
+        explicit_cardiac = parse_intent("exercise and left ventricular hypertrophy")
+        self.assertEqual(explicit_cardiac.sense_excludes, [])
+
+    def test_clean_query_text_drops_filler_and_widens_in_or_mode(self):
+        spec = parse_intent("influence of bad diet on diabetes type 1")
+        q_and = spec.clean_query_text("and")
+        self.assertNotIn("influence", q_and)
+        self.assertIn("type 1 diabetes", q_and)
+
+        hyp = parse_intent("optimal training for hypertrophy in younger adults since 2015")
+        self.assertNotEqual(hyp.clean_query_text("or"), hyp.clean_query_text("and"))
+        self.assertLess(len(hyp.clean_query_text("or").split()), len(hyp.clean_query_text("and").split()))
+
     def test_excluded_words_expand_to_synonyms_and_plurals(self):
         terms = exclusion_terms("rodents")
         for expected in ("rodent", "mice", "murine"):

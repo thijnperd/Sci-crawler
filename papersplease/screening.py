@@ -57,6 +57,179 @@ def _citation_norm(count: int, ceiling: int) -> float:
     return math.log1p(max(count, 0)) / math.log1p(ceiling)
 
 
+_TYPE2_TITLE_PATTERNS = (
+    _pattern("type 2 diabetes"),
+    _pattern("diabetes type 2"),
+    _pattern("type ii diabetes"),
+    _pattern("t2d"),
+    _pattern("t2dm"),
+    _pattern("non insulin dependent diabetes"),
+    _pattern("gestational diabetes"),
+)
+_TYPE1_TITLE_PATTERNS = (
+    _pattern("type 1 diabetes"),
+    _pattern("diabetes type 1"),
+    _pattern("type i diabetes"),
+    _pattern("t1d"),
+    _pattern("t1dm"),
+    _pattern("insulin dependent diabetes"),
+)
+
+_DIET_REVERSE_ALIASES = (
+    "eating habit", "eating habits", "eating behavior", "eating behaviour",
+    "eating behaviors", "eating behaviours", "disordered eating",
+    "eating disorder", "eating disorders", "dietary behavior",
+    "dietary behaviour", "dietary habits", "food choice", "food choices",
+    "dietary adherence", "diet", "diets", "dietary", "nutrition",
+    "nutritional", "food intake",
+)
+
+_DIABETES_REVERSE_ALIASES = ("diabetes", "diabetes mellitus", "diabetic")
+
+_BUCKET_ORDER = {"in_scope": 0, "adjacent": 1, "out_of_scope": 2}
+
+
+def _alt_pattern(terms: Iterable[str]) -> str:
+    cleaned = sorted({normalize(t) for t in terms if normalize(t)}, key=len, reverse=True)
+    return "|".join(re.escape(t) for t in cleaned)
+
+
+def _compile_causal_patterns(a_alt: str, b_alt: str) -> list[re.Pattern[str]]:
+    if not a_alt or not b_alt:
+        return []
+    a = rf"(?<![a-z0-9])(?:{a_alt})(?![a-z0-9])"
+    b = rf"(?<![a-z0-9])(?:{b_alt})(?![a-z0-9])"
+    return [
+        re.compile(
+            rf"(?:influence|effect|effects|impact|impacts|role|consequence|consequences|contribution)"
+            rf"\s+of\s+.{{0,45}}?{a}.{{0,65}}?\s+(?:on|upon|toward|towards)\s+.{{0,45}}?{b}"
+        ),
+        re.compile(
+            rf"{a}.{{0,45}}?\s+(?:causes?|causing|leads?\s+to|leading\s+to|induces?|inducing|"
+            rf"triggers?|triggering|increases?|increasing|reduces?|reducing|prevents?|preventing|"
+            rf"improves?|improving|worsens?|worsening|promotes?|promoting|affects?|affecting|"
+            rf"influences?|influencing|impacts?|impacting|predicts?|predicting|"
+            rf"contributes?\s+to|modulates?|exacerbates?|ameliorates?|"
+            rf"alters?|altering|changes?|changing|shapes?|shaping|disrupts?|disrupting)"
+            rf"\s+.{{0,55}}?{b}"
+        ),
+        re.compile(
+            rf"{b}.{{0,40}}?\s+(?:caused\s+by|induced\s+by|triggered\s+by|attributable\s+to|"
+            rf"resulting\s+from|due\s+to)\s+.{{0,40}}?{a}"
+        ),
+        re.compile(
+            rf"(?:risk|onset|development|incidence|progression|control|management|complications?)"
+            rf"\s+of\s+.{{0,30}}?{b}.{{0,45}}?\s+(?:from|by|after|following)\s+.{{0,30}}?{a}"
+        ),
+    ]
+
+
+def _check_direction(
+    title_norm: str,
+    sentence_pairs: list[tuple[str, str]],
+    spec: ScopeSpec,
+) -> tuple[str | None, str, str]:
+    """Verify causal direction (X -> Y) against reversed (Y -> X) or descriptive framing."""
+    if not spec.relation or not spec.relation.source or not spec.relation.target:
+        return None, "", ""
+
+    facet_map = {f.name: f for f in spec.facets}
+    src_terms: set[str] = set()
+    for name in spec.relation.source:
+        if name in facet_map:
+            src_terms.update(facet_map[name].terms)
+            src_terms.update(facet_map[name].canonical)
+        else:
+            src_terms.add(name)
+
+    dst_terms: set[str] = set()
+    for name in spec.relation.target:
+        if name in facet_map:
+            dst_terms.update(facet_map[name].terms)
+            dst_terms.update(facet_map[name].canonical)
+        else:
+            dst_terms.add(name)
+
+    rev_src_terms = set(src_terms)
+    if any(n in ("unhealthy diet", "diet") for n in spec.relation.source):
+        rev_src_terms.update(_DIET_REVERSE_ALIASES)
+
+    rev_dst_terms = set(dst_terms)
+    if any(n in ("type 1 diabetes", "type 2 diabetes") for n in spec.relation.target):
+        rev_dst_terms.update(_DIABETES_REVERSE_ALIASES)
+
+    fwd_patterns = _compile_causal_patterns(_alt_pattern(src_terms), _alt_pattern(dst_terms))
+    rev_patterns = _compile_causal_patterns(_alt_pattern(rev_dst_terms), _alt_pattern(rev_src_terms))
+
+    src_rev_alt = _alt_pattern(rev_src_terms)
+    dst_rev_alt = _alt_pattern(rev_dst_terms)
+    desc_pattern = (
+        re.compile(
+            rf"(?<![a-z0-9])(?:{src_rev_alt})(?![a-z0-9]).{{0,45}}?\s+(?:in|among|amongst|of)\s+"
+            rf".{{0,45}}?\b(?:with|having|diagnosed\s+with)\s+.{{0,25}}?"
+            rf"(?<![a-z0-9])(?:{dst_rev_alt})(?![a-z0-9])"
+        )
+        if src_rev_alt and dst_rev_alt
+        else None
+    )
+
+    def _matches(patterns: list[re.Pattern[str]], text: str) -> bool:
+        return any(pat.search(text) for pat in patterns) if text else False
+
+    title_fwd = _matches(fwd_patterns, title_norm)
+    title_rev = _matches(rev_patterns, title_norm)
+    title_desc = bool(desc_pattern and title_norm and desc_pattern.search(title_norm))
+
+    src_label = ", ".join(spec.relation.source)
+    dst_label = ", ".join(spec.relation.target)
+
+    if title_rev and not title_fwd:
+        raw_t = sentence_pairs[0][0] if sentence_pairs else ""
+        return "reversed", f"reversed direction: studies {dst_label} -> {src_label}, asked for {src_label} -> {dst_label}", raw_t
+    if title_fwd:
+        raw_t = sentence_pairs[0][0] if sentence_pairs else ""
+        return "aligned", f"direction aligned ({src_label} -> {dst_label})", raw_t
+
+    fwd_sentence = ""
+    rev_hits = 0
+    for raw_s, norm_s in sentence_pairs[1:]:
+        if _matches(fwd_patterns, norm_s):
+            if not fwd_sentence:
+                fwd_sentence = raw_s
+        if _matches(rev_patterns, norm_s):
+            rev_hits += 1
+
+    if rev_hits > 0 and not fwd_sentence:
+        return "reversed", f"reversed direction: studies {dst_label} -> {src_label}, asked for {src_label} -> {dst_label}", ""
+    if fwd_sentence:
+        return "aligned", f"direction aligned ({src_label} -> {dst_label})", fwd_sentence
+    if title_desc:
+        raw_t = sentence_pairs[0][0] if sentence_pairs else ""
+        return "descriptive", f"describes {src_label} in {dst_label} without clear {src_label} -> {dst_label} effect", raw_t
+    return "ambiguous", "", ""
+
+
+def _subtype_mismatch(title_norm: str, spec: ScopeSpec) -> str | None:
+    if not title_norm:
+        return None
+    facet_map = {f.name: f for f in spec.facets}
+    if "type 1 diabetes" in facet_map and "type 2 diabetes" not in facet_map:
+        t1_patterns = [_pattern(t) for t in facet_map["type 1 diabetes"].terms]
+        has_t1 = any(_hit(p, title_norm) for p in t1_patterns) or bool(
+            re.search(r"\btype\s+(?:1|i)\b", title_norm)
+        )
+        if any(_hit(p, title_norm) for p in _TYPE2_TITLE_PATTERNS) and not has_t1:
+            return "title is about type 2 / gestational diabetes, not type 1 diabetes"
+    elif "type 2 diabetes" in facet_map and "type 1 diabetes" not in facet_map:
+        t2_patterns = [_pattern(t) for t in facet_map["type 2 diabetes"].terms]
+        has_t2 = any(_hit(p, title_norm) for p in t2_patterns) or bool(
+            re.search(r"\btype\s+(?:2|ii)\b", title_norm)
+        )
+        if any(_hit(p, title_norm) for p in _TYPE1_TITLE_PATTERNS) and not has_t2:
+            return "title is about type 1 diabetes, not type 2 diabetes"
+    return None
+
+
 def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
     """Score one paper against the parsed intent."""
     title = normalize(paper.title)
@@ -71,7 +244,12 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
     raw_sentences = [paper.title or ""] + _SENTENCE_SPLIT.split(paper.abstract or "")
     if paper.excerpt:
         raw_sentences += _SENTENCE_SPLIT.split(paper.excerpt)
-    sentences = [normalize(item) for item in raw_sentences if item and item.strip()]
+    sentence_pairs = [
+        (" ".join(item.split()), normalize(item))
+        for item in raw_sentences
+        if item and item.strip()
+    ]
+    sentences = [norm for _, norm in sentence_pairs]
 
     total_weight = sum(f.weight for f in spec.facets) or 1.0
     matched_weight = 0.0
@@ -79,6 +257,7 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
     missing: list[str] = []
     title_hits: list[str] = []
     best_sentence_weight = 0.0
+    best_sentence_raw = ""
 
     for facet in spec.facets:
         patterns = [_pattern(t) for t in facet.terms]
@@ -95,8 +274,8 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
 
     # Proximity: the strongest single sentence, as a share of total facet weight.
     best_sentence_facets: list[str] = []
-    if sentences and spec.facets:
-        for sentence in sentences:
+    if sentence_pairs and spec.facets:
+        for raw_sentence, sentence in sentence_pairs:
             covered = 0.0
             names: list[str] = []
             for facet in spec.facets:
@@ -106,6 +285,7 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
             if covered > best_sentence_weight:
                 best_sentence_weight = covered
                 best_sentence_facets = names
+                best_sentence_raw = raw_sentence
 
     coverage = round(matched_weight / total_weight, 3)
     title_coverage = round(len(title_hits) / max(len(spec.facets), 1), 3)
@@ -114,6 +294,8 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
     score = 0.72 * coverage + 0.18 * title_coverage + 0.10 * proximity
     if not title_hits:
         score *= 0.78  # abstract-only matches are usually the broad ones
+    if not body:
+        score *= 0.90  # title-only records carry higher uncertainty than verified abstracts
     score = round(min(1.0, score), 3)
 
     verdict = Verdict(
@@ -124,6 +306,7 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
         title_coverage=title_coverage,
         matched=matched,
         missing=missing,
+        matched_snippet=best_sentence_raw[:320],
     )
 
     # Explicit exclusions and date filters are hard disqualifiers.
@@ -183,6 +366,26 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
                 verdict.in_scope = False
                 verdict.reason = verdict.excluded_reason
                 return verdict
+
+    for sense_term, label in spec.sense_excludes:
+        found = _pattern(sense_term).search(haystack) if haystack else None
+        if found:
+            verdict.excluded_reason = (
+                f"wrong domain sense ({label}: matched '{found.group(0)}')"
+            )
+            verdict.bucket = "out_of_scope"
+            verdict.in_scope = False
+            verdict.reason = verdict.excluded_reason
+            return verdict
+
+    subtype_reason = _subtype_mismatch(title, spec)
+    if subtype_reason:
+        verdict.excluded_reason = subtype_reason
+        verdict.bucket = "out_of_scope"
+        verdict.in_scope = False
+        verdict.reason = verdict.excluded_reason
+        return verdict
+
     if paper.year and spec.year_from and paper.year < spec.year_from:
         verdict.excluded_reason = f"year {paper.year} is before {spec.year_from}"
         verdict.bucket = "out_of_scope"
@@ -221,6 +424,18 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
             verdict.reason = verdict.excluded_reason
             return verdict
 
+    direction, dir_note, dir_snippet = _check_direction(title, sentence_pairs, spec)
+    verdict.direction = direction
+    if dir_snippet and (direction == "aligned" or not verdict.matched_snippet):
+        verdict.matched_snippet = dir_snippet[:320]
+    if direction == "reversed":
+        verdict.score = round(verdict.score * 0.45, 3)
+        verdict.excluded_reason = dir_note
+        verdict.bucket = "out_of_scope"
+        verdict.in_scope = False
+        verdict.reason = dir_note
+        return verdict
+
     if (
         coverage >= spec.min_scope
         and len(matched) >= min(2, len(spec.facets))
@@ -237,7 +452,17 @@ def screen_one(paper: Paper, spec: ScopeSpec) -> Verdict:
         verdict.bucket = "out_of_scope"
         verdict.in_scope = False
 
+    if direction == "descriptive":
+        if verdict.bucket == "in_scope":
+            verdict.bucket = "adjacent"
+            verdict.in_scope = False
+        verdict.score = round(verdict.score * 0.78, 3)
+    elif direction == "aligned":
+        verdict.score = round(min(1.0, verdict.score + 0.08), 3)
+
     bits = []
+    if dir_note:
+        bits.append(dir_note)
     if not head_present and spec.head is not None:
         bits.append(f"head concept '{spec.head.name}' absent")
     if head_present and not cooccur and head_name:
@@ -287,12 +512,18 @@ Research intent (verbatim): "{intent}"
 The intent was decomposed into these concepts that a paper must actually be
 about: {facets}
 
-Judge each candidate on SUBJECT-LEVEL scope, not keyword presence. A paper on a
-neighbouring topic is out of scope, e.g. for "muscle strength in older adults":
-- "muscle mass and ageing" -> too_broad (mass is not strength)
-- "strength training in young athletes" -> adjacent (population wrong)
-- "grip strength predicts mortality in the elderly" -> in_scope
-- "muscle fibre typing in rodents" -> off_topic
+Judge each candidate on SUBJECT-LEVEL scope, causal direction, and anatomical/domain
+sense, not mere keyword presence:
+- Check causal direction: if the intent asks how X influences Y, a paper about how Y
+  influences X (reversed causation) or merely describing X in patients with Y is NOT
+  in_scope (use "out_of_scope" for reversed, "adjacent" for descriptive).
+- Check domain sense: e.g. exercise-induced cardiac/ventricular hypertrophy is NOT
+  skeletal muscle hypertrophy ("off_topic"); type 2 diabetes is NOT type 1 diabetes.
+- A paper on a neighbouring topic is out of scope, e.g. for "muscle strength in older adults":
+  - "muscle mass and ageing" -> too_broad (mass is not strength)
+  - "strength training in young athletes" -> adjacent (population wrong)
+  - "grip strength predicts mortality in the elderly" -> in_scope
+  - "muscle fibre typing in rodents" -> off_topic
 
 Return ONLY minified JSON of exactly this shape:
 {{"verdicts":[{{"id":"1","verdict":"in_scope|adjacent|out_of_scope","specificity":"on_target|too_broad|too_specific|adjacent|off_topic","score":0.0,"reason":"<=25 words"}}]}}
@@ -402,7 +633,7 @@ def combine(verdict: Verdict, llm: dict[str, Any] | None) -> Verdict:
 
 
 def rank(papers: Iterable[Paper], verdicts: Sequence[Verdict]) -> list[tuple[Paper, Verdict]]:
-    """Order screened papers: scope first, then citations, then recency."""
+    """Order screened papers: bucket (in_scope -> adjacent -> rejected), then score, citations, recency."""
     papers = list(papers)
     pairs = list(zip(papers, verdicts))
     ceiling = max((p.cited_by for p in papers), default=0)
@@ -410,13 +641,13 @@ def rank(papers: Iterable[Paper], verdicts: Sequence[Verdict]) -> list[tuple[Pap
     newest = max(years) if years else None
     oldest = min(years) if years else None
 
-    def sort_key(pair: tuple[Paper, Verdict]) -> tuple[float, float]:
+    def sort_key(pair: tuple[Paper, Verdict]) -> tuple[int, float, float]:
         paper, verdict = pair
         recency = 0.0
         if newest and oldest and newest != oldest and paper.year:
             recency = (paper.year - oldest) / (newest - oldest)
-        blended = 0.82 * verdict.score + 0.13 * _citation_norm(paper.cited_by, ceiling) + 0.05 * recency
-        # Sort descending, so invert for the tuple comparison.
-        return (-blended, -verdict.coverage)
+        blended = 0.84 * verdict.score + 0.11 * _citation_norm(paper.cited_by, ceiling) + 0.05 * recency
+        # Sort bucket ascending (in_scope first), then score/coverage descending.
+        return (_BUCKET_ORDER.get(verdict.bucket, 2), -blended, -verdict.coverage)
 
     return sorted(pairs, key=sort_key)

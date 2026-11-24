@@ -4,7 +4,7 @@ import unittest
 
 from papersplease.models import Paper, ScopeSpec
 from papersplease.intent import parse_intent
-from papersplease.screening import combine, screen_many, screen_one
+from papersplease.screening import combine, rank, screen_many, screen_one
 
 INTENT = "muscle strength in older adults"
 
@@ -285,6 +285,112 @@ class RequireInFieldTests(unittest.TestCase):
             self.spec,
         )
         self.assertNotIn("required term", verdict.reason)
+
+
+class CausalDirectionTests(unittest.TestCase):
+    def setUp(self):
+        self.spec = parse_intent("influence of bad diet on diabetes type 1")
+
+    def test_aligned_diet_to_type_1_diabetes_passes(self):
+        verdict = screen_one(
+            paper(
+                "Ultra-processed food and unhealthy diet increase risk of type 1 diabetes",
+                "Poor dietary quality and ultra-processed food intake increase type 1 diabetes risk.",
+            ),
+            self.spec,
+        )
+        self.assertEqual(verdict.bucket, "in_scope")
+        self.assertEqual(verdict.direction, "aligned")
+
+    def test_reversed_diabetes_to_eating_habits_is_rejected(self):
+        verdict = screen_one(
+            paper(
+                "The influence of type 1 diabetes on eating habits and poor diet quality",
+                "Type 1 diabetes alters eating habits and causes disordered eating behaviors.",
+            ),
+            self.spec,
+        )
+        self.assertEqual(verdict.bucket, "out_of_scope")
+        self.assertEqual(verdict.direction, "reversed")
+        self.assertIn("reversed direction", verdict.reason)
+
+    def test_descriptive_diet_in_type_1_diabetes_is_demoted_to_adjacent(self):
+        verdict = screen_one(
+            paper(
+                "Dietary habits in adolescents with type 1 diabetes",
+                "We surveyed poor diet quality and meal timing in 120 adolescents with type 1 diabetes.",
+            ),
+            self.spec,
+        )
+        self.assertEqual(verdict.bucket, "adjacent")
+        self.assertEqual(verdict.direction, "descriptive")
+
+    def test_type_2_diabetes_title_is_rejected_while_mixed_title_passes_guard(self):
+        t2 = screen_one(
+            paper(
+                "Poor diet and type 2 diabetes risk",
+                "Unhealthy diet increases type 2 diabetes incidence.",
+            ),
+            self.spec,
+        )
+        self.assertEqual(t2.bucket, "out_of_scope")
+        self.assertIn("type 2", t2.excluded_reason)
+
+        mixed = screen_one(
+            paper(
+                "Poor diet in youth with type 1 or type 2 diabetes",
+                "Poor diet worsens glycemic control in type 1 diabetes.",
+            ),
+            self.spec,
+        )
+        self.assertIsNone(mixed.excluded_reason)
+
+
+class SenseDisambiguationAndRankingTests(unittest.TestCase):
+    def setUp(self):
+        self.spec = parse_intent("optimal training for hypertrophy in younger adults since 2015")
+
+    def test_cardiac_hypertrophy_is_rejected_as_wrong_domain_sense(self):
+        verdict = screen_one(
+            paper(
+                "Left ventricular hypertrophy in young adult athletes after training",
+                "Exercise training induced left ventricular hypertrophy in young adults.",
+            ),
+            self.spec,
+        )
+        self.assertEqual(verdict.bucket, "out_of_scope")
+        self.assertIn("wrong domain sense", verdict.reason)
+
+    def test_skeletal_muscle_hypertrophy_in_young_adults_passes(self):
+        verdict = screen_one(
+            paper(
+                "Resistance training volume and skeletal muscle hypertrophy in young adults",
+                "Exercise training induced skeletal muscle hypertrophy in young adults.",
+            ),
+            self.spec,
+        )
+        self.assertEqual(verdict.bucket, "in_scope")
+
+    def test_rank_keeps_in_scope_above_highly_cited_adjacent(self):
+        in_p = paper(
+            "Resistance training volume and skeletal muscle hypertrophy in young adults",
+            "Exercise training induced skeletal muscle hypertrophy in young adults.",
+            cited_by=1,
+            year=2023,
+        )
+        adj_p = paper(
+            "Exercise training in older adults",
+            "Muscle hypertrophy after exercise training in older adults.",
+            cited_by=10000,
+            year=2020,
+        )
+        in_v = screen_one(in_p, self.spec)
+        adj_v = screen_one(adj_p, self.spec)
+        self.assertEqual(in_v.bucket, "in_scope")
+        self.assertEqual(adj_v.bucket, "adjacent")
+
+        ranked = rank([adj_p, in_p], [adj_v, in_v])
+        self.assertEqual(ranked[0][0].title, in_p.title)
 
 
 if __name__ == "__main__":

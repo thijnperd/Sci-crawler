@@ -124,6 +124,19 @@ class Facet:
 
 
 @dataclass
+class Relation:
+    """A directional relationship parsed from the intent (e.g. X -> Y)."""
+
+    kind: str = "causal"  # causal: source -> target
+    source: list[str] = field(default_factory=list)
+    target: list[str] = field(default_factory=list)
+    cue: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class ScopeSpec:
     """A parsed research intent: what the user wants, and what disqualifies."""
 
@@ -151,6 +164,8 @@ class ScopeSpec:
     # name one of them in its title, so a supplement trial that happened to
     # record "sets" and "sessions per week" cannot pass as a training paper.
     anchors: list[str] = field(default_factory=list)
+    relation: Relation | None = None
+    sense_excludes: list[tuple[str, str]] = field(default_factory=list)
 
     def facet_names(self) -> list[str]:
         return [f.name for f in self.facets]
@@ -170,6 +185,24 @@ class ScopeSpec:
                 break
         order = {facet.name: index for index, facet in enumerate(self.facets)}
         return sorted(chosen, key=lambda facet: order[facet.name])
+
+    def clean_query_text(self, mode: str = "and") -> str:
+        """Build a concise keyword query for free-text search endpoints.
+
+        Drops conversational boilerplate and structural cues (like 'influence',
+        'effect', 'optimal') while keeping phrases from the strongest facets.
+        In ``or`` mode, narrows to the 2 strongest facets so fallback queries
+        actually broaden instead of repeating the cached ``and`` URL.
+        """
+        limit = 2 if mode == "or" else 4
+        facets = self.search_facets(limit)
+        if not facets:
+            return self.search_text or self.intent
+        parts = [
+            (facet.canonical[0] if facet.canonical else facet.name)
+            for facet in facets
+        ]
+        return " ".join(p for p in parts if p)
 
     def query(self, mode: str = "and", fields: Iterable[str] = ()) -> str:
         """Build a source query string from the facets.
@@ -191,7 +224,10 @@ class ScopeSpec:
         query = joiner.join(chunks) or self.intent
         if fields:
             field = next(iter(fields))
-            query = joiner.join(f"{field}:{c}" for c in chunks) if chunks else f"{field}:{self.intent}"
+            if chunks:
+                query = joiner.join(f"{field}:{c}" for c in chunks)
+            else:
+                query = f"{field}:({self.intent})"
         return query
 
     def to_dict(self) -> dict[str, Any]:
@@ -208,6 +244,8 @@ class ScopeSpec:
             "required": [list(item) for item in self.required],
             "require_field": self.require_field,
             "anchors": self.anchors,
+            "relation": self.relation.to_dict() if self.relation else None,
+            "sense_excludes": [term for term, _ in self.sense_excludes],
         }
 
 
@@ -227,6 +265,8 @@ class Verdict:
     reason: str = ""
     excluded_reason: str | None = None
     llm: dict[str, Any] | None = None
+    direction: str | None = None
+    matched_snippet: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

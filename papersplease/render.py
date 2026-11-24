@@ -73,7 +73,7 @@ def _finding_block(index: int, finding: Finding, theme: ui.Theme, width: int) ->
     verdict = finding.verdict
     out: list[str] = []
     number = theme.dim(f"{index:>2}.")
-    title = ui.truncate(paper.title, max(20, width - 4))
+    title = ui.truncate(paper.title, max(20, width - 4), unicode=theme.unicode)
     out.append(f"{number} {theme.bold(title)}")
     out.extend(_meta_lines(paper, width, indent="    ", sep=theme.sep))
     if paper.doi:
@@ -177,7 +177,7 @@ def render_text(
         out.append(ui.rule(width, theme))
         for finding in rejected[:max_rejected]:
             reason = finding.verdict.excluded_reason or finding.verdict.reason
-            out.append(f"{theme.red(theme.cross)} {ui.truncate(finding.paper.title, width - 2)}")
+            out.append(f"{theme.red(theme.cross)} {ui.truncate(finding.paper.title, width - 2, unicode=theme.unicode)}")
             out.extend(ui.wrap(reason, width, initial="  ", subsequent="  "))
         out.append("")
 
@@ -213,9 +213,9 @@ def render_explain(payload: dict[str, Any], *, width: int | None = None, color: 
     width = width or ui.terminal_width()
     out = _header("scope contract (offline)", theme, width)
 
-    out.extend(ui.kv("Intent", f'"{payload["intent"]}"', theme, label_width=9, width=width))
-    out.extend(ui.kv("Search", payload.get("search_text") or "(same as intent)", theme, label_width=9, width=width))
-    out.extend(ui.kv("Query", payload.get("query") or "(none)", theme, label_width=9, width=width))
+    out.extend(ui.kv("Intent", f'"{payload["intent"]}"', theme, label_width=11, width=width))
+    out.extend(ui.kv("Search", payload.get("search_text") or "(same as intent)", theme, label_width=11, width=width))
+    out.extend(ui.kv("Query", payload.get("query") or "(none)", theme, label_width=11, width=width))
 
     limits = [f"coverage {theme.ge} {payload['min_scope']:.2f}"]
     years = payload.get("years") or {}
@@ -225,20 +225,20 @@ def render_explain(payload: dict[str, Any], *, width: int | None = None, color: 
     if payload.get("anchors"):
         guard += "; anchors " + ", ".join(payload["anchors"])
     limits.append(guard)
-    out.extend(ui.kv("Guard", f"  {theme.sep}  ".join(limits), theme, label_width=9, width=width))
+    out.extend(ui.kv("Guard", f"  {theme.sep}  ".join(limits), theme, label_width=11, width=width))
     out.append("")
 
     facets = payload.get("facets") or []
     out.append(theme.paint("FACETS", "bold", "cyan") + theme.dim(f"  {len(facets)} concepts"))
     out.append(ui.rule(width, theme))
     for facet in facets:
-        name = facet["name"][:14].ljust(14)
+        name = facet["name"][:16].ljust(16)
         weight = f"{facet.get('weight', 1.0):.2f}"
         terms = ", ".join(facet.get("terms", [])[:8])
-        first, *rest = ui.wrap(terms, max(20, width - 24))
+        first, *rest = ui.wrap(terms, max(20, width - 26))
         out.append(f"  {theme.cyan(name)} {theme.dim(weight)}  {first}")
         for line in rest:
-            out.append(" " * 24 + line)
+            out.append(" " * 26 + line)
     if not facets:
         out.append(theme.dim("  (none)"))
     out.append("")
@@ -249,10 +249,16 @@ def render_explain(payload: dict[str, Any], *, width: int | None = None, color: 
                 "Anchors",
                 ", ".join(payload["anchors"]) + "  (cover both, name at least one in the title)",
                 theme,
-                label_width=9,
+                label_width=11,
                 width=width,
             )
         )
+    relation = payload.get("relation")
+    if relation:
+        src = ", ".join(relation.get("source") or [])
+        dst = ", ".join(relation.get("target") or [])
+        arrow = " -> " if not theme.unicode else " → "
+        out.extend(ui.kv("Direction", f"{src}{arrow}{dst}", theme, label_width=11, width=width))
     if payload.get("exclude"):
         catches = payload.get("exclude_terms") or {}
         for term in payload["exclude"]:
@@ -260,12 +266,12 @@ def render_explain(payload: dict[str, Any], *, width: int | None = None, color: 
             suffix = "  (catches " + ", ".join(variants[:6]) + ")" if variants else ""
             out.extend(ui.wrap(term + suffix, width, initial=f"{theme.times} ", subsequent="  "))
     else:
-        out.extend(ui.kv("Excluded", "(none)", theme, label_width=9, width=width))
+        out.extend(ui.kv("Excluded", "(none)", theme, label_width=11, width=width))
 
     if payload.get("required"):
         terms = ", ".join(term for term, _ in payload["required"])
         out.extend(ui.kv("Required", f"{terms}  (in {payload.get('require_field') or 'any field'})",
-                         theme, label_width=9, width=width))
+                         theme, label_width=11, width=width))
 
     if payload.get("notes") or payload.get("issues"):
         out.append("")
@@ -294,7 +300,7 @@ def render_providers(rows: Sequence[dict[str, Any]], *, width: int | None = None
         note_width = max(16, width - 16 - 5 - 30 - 6)
         out.append(
             f"{row['source'][:16]:16}  {state_text}{pad}  {key}{key_pad}  "
-            f"{ui.truncate(row['note'], note_width)}"
+            f"{ui.truncate(row['note'], note_width, unicode=theme.unicode)}"
         )
     out.append("")
     out.append(theme.dim("Set PAPERSPLEASE_SOURCES to change the default set; keys live in the environment."))
@@ -315,7 +321,7 @@ def render_mirrors(statuses: Sequence, *, width: int | None = None, color: bool 
         note_width = max(12, width - 28 - 12 - 8 - 8)
         out.append(
             f"{status.mirror[:28]:28}  {state_text}{pad}  {latency:>8}  "
-            f"{ui.truncate(status.note, note_width)}"
+            f"{ui.truncate(status.note, note_width, unicode=theme.unicode)}"
         )
     out.append("")
     if not any(item.usable for item in statuses):
@@ -384,7 +390,7 @@ def render_downloads(results: Sequence[dict[str, Any]], *, width: int | None = N
         glyph = theme.green(theme.check) if ok else theme.red(theme.cross)
         label = theme.green("saved") if ok else theme.red("failed")
         title = item.get("title") or item.get("target") or "(unknown)"
-        out.append(f"{glyph} {label}  {ui.truncate(title, width - 10)}")
+        out.append(f"{glyph} {label}  {ui.truncate(title, width - 10, unicode=theme.unicode)}")
         if ok:
             out.append(f"    {theme.dim('path')} {item.get('path')}")
             out.append(f"    {theme.dim('from')} {item.get('source') or 'unknown'}")

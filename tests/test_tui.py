@@ -187,5 +187,68 @@ class CliFindArgsTests(unittest.TestCase):
             self.assertIn("Resistance training volume", buf.getvalue())
 
 
+class AdvancedTuiTests(unittest.TestCase):
+    def test_detail_scrolling_pane_focus_and_narrow_bounds(self):
+        rep = _sample_report()
+        rep.findings[0].paper.abstract = " ".join(["Word"] * 220)
+        app = TuiApp(report=rep, stream=io.StringIO())
+
+        self.assertEqual(app.focus_pane, "list")
+        self.assertTrue(app.handle_key("RIGHT"))
+        self.assertEqual(app.focus_pane, "detail")
+        self.assertTrue(app.handle_key("LEFT"))
+        self.assertEqual(app.focus_pane, "list")
+
+        self.assertEqual(app.detail_scroll, 0)
+        app.handle_key("J")
+        self.assertEqual(app.detail_scroll, 1)
+        app.handle_key("PGDN")
+        self.assertEqual(app.detail_scroll, 7)
+        app.handle_key("K")
+        self.assertEqual(app.detail_scroll, 6)
+        app.handle_key("PGUP")
+        self.assertEqual(app.detail_scroll, 0)
+
+        narrow = app.render_lines(56, 18)
+        self.assertEqual(len(narrow), 18)
+        for line in narrow:
+            self.assertLessEqual(ui.visible_len(line), 56)
+
+    def test_starring_shortlist_sort_and_live_filter(self):
+        app = TuiApp(report=_sample_report(), stream=io.StringIO())
+        self.assertTrue(app.handle_key("s"))
+        self.assertEqual(len(app.starred), 1)
+
+        self.assertTrue(app.handle_key("4"))
+        self.assertEqual(app.current_bucket, "shortlist")
+        rendered = "\n".join(app.render_lines(112, 30))
+        self.assertIn("Shortlist (1)", rendered)
+
+        self.assertTrue(app.handle_key("S"))
+        self.assertEqual(app.sort_mode, "year")
+        self.assertTrue(app.handle_key("S"))
+        self.assertEqual(app.sort_mode, "citations")
+
+        self.assertTrue(app.handle_key("\\"))
+        for ch in "older":
+            app.handle_key(ch)
+        app.handle_key("ENTER")
+        self.assertEqual(app.filter_text, "older")
+        self.assertTrue(app.handle_key("TAB"))
+        self.assertEqual(app.current_bucket, "adjacent")
+        self.assertEqual(app.current_finding().paper.title, "Training in older adults")
+
+        app.handle_key("ESC")
+        self.assertEqual(app.filter_text, "")
+
+    def test_truncate_ansi_preserves_ansi_and_visible_width(self):
+        styled = "\x1b[36mHello \x1b[1mWorld from PapersPlease\x1b[0m"
+        cut = ui.truncate_ansi(styled, 16, unicode=False)
+        self.assertLessEqual(ui.visible_len(cut), 16)
+        self.assertIn("\x1b[36m", cut)
+        self.assertIn("\x1b[0m", cut)
+        self.assertTrue(ui._ANSI.sub("", cut).endswith("..."))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -175,6 +175,8 @@ def explain_intent(
         "required": [list(item) for item in spec.required],
         "require_field": spec.require_field,
         "anchors": spec.anchors,
+        "relation": spec.relation.to_dict() if spec.relation else None,
+        "sense_excludes": [term for term, _ in spec.sense_excludes],
         "notes": spec.extra_notes,
         "issues": issues,
         "how_to_read": (
@@ -399,16 +401,27 @@ def find(
         report.warnings.append(f"filters kept {len(merged)} of {before_filters} candidates")
     caches = store.Caches(settings, enabled=use_cache)
 
-    # Read: fill in missing abstracts before judging anything.
+    # Read: fill in missing abstracts before judging anything (batched OpenAlex, then EPMC).
     if merged:
-        to_read = [p for p in merged if not p.abstract][: max(12, limit)]
-        _emit(on_progress, "read", done=0, total=len(to_read))
-        for idx, paper in enumerate(to_read, start=1):
+        missing_abs = [p for p in merged if not p.abstract]
+        if missing_abs:
+            _emit(on_progress, "read", done=0, total=len(missing_abs))
             try:
-                reading.read(paper, settings)
+                reading.batch_fetch_abstracts(missing_abs, settings)
             except Exception as exc:  # pragma: no cover - defensive
-                report.warnings.append(f"read failed for {paper.doi or paper.title[:40]}: {exc}")
-            _emit(on_progress, "read", done=idx, total=len(to_read))
+                report.warnings.append(f"batch abstract lookup failed: {exc}")
+            remaining = [p for p in missing_abs if not p.abstract and (p.pmid or p.pmcid or p.doi)][:12]
+            done_count = len(missing_abs) - len(remaining)
+            _emit(on_progress, "read", done=done_count, total=len(missing_abs))
+            for idx, paper in enumerate(remaining, start=done_count + 1):
+                try:
+                    reading.read(paper, settings)
+                except Exception as exc:  # pragma: no cover - defensive
+                    report.warnings.append(f"read failed for {paper.doi or paper.title[:40]}: {exc}")
+                _emit(on_progress, "read", done=idx, total=len(missing_abs))
+            _emit(on_progress, "read", done=len(missing_abs), total=len(missing_abs))
+        else:
+            _emit(on_progress, "read", done=0, total=0)
     else:
         _emit(on_progress, "read", done=0, total=0)
 
@@ -445,6 +458,10 @@ def find(
             if p.key() not in known and title_key(p.title) not in known_titles
         ]
         if fresh:
+            try:
+                reading.batch_fetch_abstracts([p for p in fresh if not p.abstract], settings)
+            except Exception:
+                pass
             for paper in [p for p in fresh if not p.abstract][: max(12, expand_limit)]:
                 try:
                     reading.read(paper, settings)

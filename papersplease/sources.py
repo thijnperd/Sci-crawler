@@ -62,7 +62,7 @@ def _boolean_query(spec: ScopeSpec, mode: str, field: str | None) -> str:
 def search_europepmc(spec: ScopeSpec, settings: Settings, limit: int, mode: str = "and") -> SourceResult:
     query = _boolean_query(spec, mode, "TITLE_ABS")
     if spec.year_from or spec.year_to:
-        query += f" AND PUB_YEAR:[{spec.year_from or 1900} TO {spec.year_to or 2100}]"
+        query = f"({query}) AND PUB_YEAR:[{spec.year_from or 1900} TO {spec.year_to or 2100}]"
     url = query_url(
         "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
         {
@@ -70,10 +70,6 @@ def search_europepmc(spec: ScopeSpec, settings: Settings, limit: int, mode: str 
             "format": "json",
             "pageSize": limit,
             "resultType": "core",
-            # Without an explicit sort Europe PMC returns newest-first, which
-            # fills the candidate pool with unread 2026 preprints. Its default
-            # has no relevance ranking, so ask for the most cited matches.
-            "sort": "CITED desc",
         },
     )
     try:
@@ -158,7 +154,7 @@ def search_crossref(spec: ScopeSpec, settings: Settings, limit: int, mode: str =
         filters.append(f"from-pub-date:{spec.year_from}-01-01")
     if spec.year_to:
         filters.append(f"until-pub-date:{spec.year_to}-12-31")
-    query = spec.search_text or spec.intent
+    query = spec.clean_query_text(mode)
     url = query_url(
         "https://api.crossref.org/works",
         {
@@ -225,8 +221,23 @@ _ATOM = "{http://www.w3.org/2005/Atom}"
 _ARXIV = "{http://arxiv.org/schemas/atom}"
 
 
+def _arxiv_query(spec: ScopeSpec, mode: str) -> str:
+    joiner = " AND " if mode == "and" else " OR "
+    chunks: list[str] = []
+    for facet in spec.search_facets(4):
+        curated = (facet.canonical or facet.terms)[:5]
+        terms = [f'all:"{w}"' if " " in w else f"all:{w}" for w in curated]
+        chunks.append("(" + " OR ".join(terms) + ")")
+    query = joiner.join(chunks) or f"all:({spec.clean_query_text(mode)})"
+    if spec.year_from or spec.year_to:
+        y1 = spec.year_from or 1991
+        y2 = spec.year_to or 2100
+        query = f"({query}) AND submittedDate:[{y1}01010000 TO {y2}12312359]"
+    return query
+
+
 def search_arxiv(spec: ScopeSpec, settings: Settings, limit: int, mode: str = "and") -> SourceResult:
-    query = _boolean_query(spec, mode, "all")
+    query = _arxiv_query(spec, mode)
     url = query_url(
         "https://export.arxiv.org/api/query",
         {"search_query": query, "start": 0, "max_results": limit, "sortBy": "relevance"},
@@ -326,7 +337,7 @@ _S2_FIELDS = (
 
 
 def search_semanticscholar(spec: ScopeSpec, settings: Settings, limit: int, mode: str = "and") -> SourceResult:
-    params = {"query": spec.search_text or spec.intent, "limit": limit, "fields": _S2_FIELDS}
+    params = {"query": spec.clean_query_text(mode), "limit": limit, "fields": _S2_FIELDS}
     if spec.year_from or spec.year_to:
         params["year"] = f"{spec.year_from or ''}-{spec.year_to or ''}"
     url = query_url("https://api.semanticscholar.org/graph/v1/paper/search", params)
@@ -376,16 +387,23 @@ _RATE_NOTE = (
 
 
 def search_openalex(spec: ScopeSpec, settings: Settings, limit: int, mode: str = "and") -> SourceResult:
+    query_text = spec.clean_query_text(mode).replace(",", " ").strip()
     filters = ["type:article"]
+    if query_text:
+        filters.append(f"title_and_abstract.search:{query_text}")
     if spec.year_from:
         filters.append(f"from_publication_date:{spec.year_from}-01-01")
     if spec.year_to:
         filters.append(f"to_publication_date:{spec.year_to}-12-31")
     params = {
-        "search": spec.search_text or spec.intent,
         "per-page": min(limit, 200),
         "filter": ",".join(filters),
-        "mailto": settings.mailto or None,
+        "select": (
+            "id,doi,title,display_name,publication_year,authorships,"
+            "primary_location,best_oa_location,abstract_inverted_index,"
+            "topics,cited_by_count,open_access,type"
+        ),
+        "mailto": settings.polite_email or None,
         "api_key": settings.openalex_key or None,
     }
     url = query_url("https://api.openalex.org/works", params)
@@ -415,7 +433,7 @@ def search_openalex(spec: ScopeSpec, settings: Settings, limit: int, mode: str =
                 url=item.get("id"),
                 keywords=[t.get("display_name", "") for t in (item.get("topics") or [])[:5]],
                 cited_by=int(item.get("cited_by_count") or 0),
-                is_oa=bool(item.get("is_oa")),
+                is_oa=bool((item.get("open_access") or {}).get("is_oa") or item.get("is_oa") or oa.get("pdf_url")),
                 oa_url=oa.get("pdf_url") or oa.get("landing_page_url"),
                 type=item.get("type"),
                 sources=["openalex"],

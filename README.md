@@ -149,8 +149,8 @@ Launch with `papersplease` (no arguments on a TTY), `papersplease tui [intent]`,
 ## Install
 
 ```bash
-git clone https://github.com/thijnperd/Sci-crawler
-cd Sci-crawler
+git clone https://github.com/thijnperd/PapersPlease
+cd PapersPlease
 pip install -e .          # or: pipx install .
 ```
 
@@ -714,3 +714,5 @@ Full comparison, sources and attribution: **[SOURCES.md](SOURCES.md)**.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+More tools at [thijnperd.github.io](https://thijnperd.github.io/).
